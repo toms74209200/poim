@@ -1,0 +1,44 @@
+name: Job - Test Small
+
+on:
+  workflow_call:
+    inputs:
+      with-coverage:
+        description: 'Run with coverage'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run tests
+        if: ${{ !inputs.with-coverage }}
+        run: cargo test --lib
+      - name: Install llvm-cov
+        if: ${{ inputs.with-coverage }}
+        run: cargo install cargo-llvm-cov
+      - name: Run tests with coverage
+        if: ${{ inputs.with-coverage }}
+        run: |
+          ignore=$(grep -Ev '^\s*(#|$)' scripts/coverage_ignore.txt | sed 's#^#src/#; s#$#.rs#' | paste -sd '|' -)
+          if [ -n "$ignore" ]; then
+            cargo llvm-cov --lib --ignore-filename-regex "$ignore" --output-path coverage.txt
+          else
+            cargo llvm-cov --lib --output-path coverage.txt
+          fi
+      - if: ${{ inputs.with-coverage }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.txt
