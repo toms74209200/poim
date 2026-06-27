@@ -1,0 +1,25 @@
+name: On Pull Request(Rust)
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/on-pullrequest-rs.yml'
+
+jobs:
+  lint:
+    uses: ./.github/workflows/job-lint.yml
+    permissions:
+      contents: write
+  small-test:
+    uses: ./.github/workflows/job-test-small.yml
+    with:
+      with-coverage: true
+  coverage:
+    needs:
+      - small-test
+    uses: ./.github/workflows/job-coverage.yml
+    with:
+      coverage-threshold: 80
