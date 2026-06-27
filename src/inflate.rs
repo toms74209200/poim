@@ -214,10 +214,7 @@ fn fixed_trees() -> (HuffmanTree, HuffmanTree) {
     for l in &mut lit_len[280..=287] {
         *l = 8;
     }
-    let mut dist_len = [0u8; 32];
-    for l in &mut dist_len {
-        *l = 5;
-    }
+    let dist_len = [5u8; 32];
     (
         HuffmanTree::from_lengths(&lit_len).unwrap(),
         HuffmanTree::from_lengths(&dist_len).unwrap(),
