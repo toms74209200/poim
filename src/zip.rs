@@ -35,6 +35,9 @@ pub enum ZipError {
     UnexpectedEof,
     InvalidSignature,
     EocdNotFound,
+    UnsupportedCompression(u16),
+    InflateError(crate::inflate::InflateError),
+    EntryNotFound,
 }
 
 fn read_u16_le(data: &[u8], offset: usize) -> Result<u16, ZipError> {
@@ -163,6 +166,31 @@ pub fn read_central_directory(data: &[u8]) -> Result<Vec<CentralDirectoryEntry>,
     }
 
     Ok(entries)
+}
+
+pub fn extract_entry(data: &[u8], entry: &CentralDirectoryEntry) -> Result<Vec<u8>, ZipError> {
+    let local = read_local_file_header(data, entry.local_header_offset as usize)?;
+    let compressed_size = entry.compressed_size as usize;
+    let end = local.data_offset + compressed_size;
+    if end > data.len() {
+        return Err(ZipError::UnexpectedEof);
+    }
+    let raw = &data[local.data_offset..end];
+
+    match entry.compression_method {
+        0 => Ok(raw.to_vec()),
+        8 => crate::inflate::inflate(raw).map_err(ZipError::InflateError),
+        other => Err(ZipError::UnsupportedCompression(other)),
+    }
+}
+
+pub fn extract_by_name(data: &[u8], name: &[u8]) -> Result<Vec<u8>, ZipError> {
+    let entries = read_central_directory(data)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.file_name == name)
+        .ok_or(ZipError::EntryNotFound)?;
+    extract_entry(data, entry)
 }
 
 pub fn read_all_local_file_headers(data: &[u8]) -> Result<Vec<LocalFileHeader>, ZipError> {
@@ -639,6 +667,129 @@ mod tests {
         fn when_read_cd_with_no_eocd_then_returns_error() {
             let data = build_local_file_header(b"a.txt", 0, b"x", &[]);
             assert_eq!(read_central_directory(&data), Err(ZipError::EocdNotFound));
+        }
+    }
+
+    mod extract_entry {
+        use super::*;
+
+        #[test]
+        fn when_extract_with_stored_entry_then_returns_raw_data() {
+            let content = b"stored content here";
+            let zip = ZipBuilder::new().add_stored(b"file.txt", content).build();
+            let entries = read_central_directory(&zip).unwrap();
+
+            let result = extract_entry(&zip, &entries[0]).unwrap();
+
+            assert_eq!(result, content);
+        }
+
+        #[test]
+        fn when_extract_with_deflated_entry_then_returns_decompressed() {
+            let original = b"Hello, ZIP extraction!";
+            let compressed: &[u8] = &[
+                0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0xd7, 0x51, 0x88, 0xf2, 0x0c, 0x50, 0x48, 0xad, 0x28,
+                0x29, 0x4a, 0x4c, 0x2e, 0xc9, 0xcc, 0xcf, 0x53, 0x04, 0x00,
+            ];
+            let zip = ZipBuilder::new()
+                .add_deflated(b"msg.txt", compressed, original.len() as u32)
+                .build();
+            let entries = read_central_directory(&zip).unwrap();
+
+            let result = extract_entry(&zip, &entries[0]).unwrap();
+
+            assert_eq!(result, original);
+        }
+
+        #[test]
+        fn when_extract_with_second_entry_then_returns_correct_data() {
+            let first = b"FIRST";
+            let second = b"SECOND";
+            let zip = ZipBuilder::new()
+                .add_stored(b"a.txt", first)
+                .add_stored(b"b.txt", second)
+                .build();
+            let entries = read_central_directory(&zip).unwrap();
+
+            let result = extract_entry(&zip, &entries[1]).unwrap();
+
+            assert_eq!(result, second);
+        }
+
+        #[test]
+        fn when_extract_with_empty_stored_then_returns_empty() {
+            let zip = ZipBuilder::new().add_stored(b"empty", &[]).build();
+            let entries = read_central_directory(&zip).unwrap();
+
+            let result = extract_entry(&zip, &entries[0]).unwrap();
+
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn when_extract_with_unsupported_method_then_returns_error() {
+            let zip = ZipBuilder::new().add_stored(b"x", b"x").build();
+            let mut entries = read_central_directory(&zip).unwrap();
+            entries[0].compression_method = 99;
+
+            assert_eq!(
+                extract_entry(&zip, &entries[0]),
+                Err(ZipError::UnsupportedCompression(99))
+            );
+        }
+    }
+
+    mod extract_by_name {
+        use super::*;
+
+        #[test]
+        fn when_extract_by_name_with_existing_file_then_returns_content() {
+            let zip = ZipBuilder::new()
+                .add_stored(b"alpha.txt", b"AAA")
+                .add_stored(b"beta.txt", b"BBB")
+                .build();
+
+            let result = extract_by_name(&zip, b"beta.txt").unwrap();
+
+            assert_eq!(result, b"BBB");
+        }
+
+        #[test]
+        fn when_extract_by_name_with_missing_file_then_returns_error() {
+            let zip = ZipBuilder::new().add_stored(b"exists.txt", b"data").build();
+
+            assert_eq!(
+                extract_by_name(&zip, b"missing.txt"),
+                Err(ZipError::EntryNotFound)
+            );
+        }
+
+        #[test]
+        fn when_extract_by_name_with_deflated_file_then_decompresses() {
+            let original = b"Hello, ZIP extraction!";
+            let compressed: &[u8] = &[
+                0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0xd7, 0x51, 0x88, 0xf2, 0x0c, 0x50, 0x48, 0xad, 0x28,
+                0x29, 0x4a, 0x4c, 0x2e, 0xc9, 0xcc, 0xcf, 0x53, 0x04, 0x00,
+            ];
+            let zip = ZipBuilder::new()
+                .add_stored(b"other.txt", b"xxx")
+                .add_deflated(b"compressed.txt", compressed, original.len() as u32)
+                .build();
+
+            let result = extract_by_name(&zip, b"compressed.txt").unwrap();
+
+            assert_eq!(result, original);
+        }
+
+        #[test]
+        fn when_extract_by_name_with_path_then_matches_full_path() {
+            let zip = ZipBuilder::new()
+                .add_stored(b"dir/sub/file.xml", b"<xml/>")
+                .build();
+
+            let result = extract_by_name(&zip, b"dir/sub/file.xml").unwrap();
+
+            assert_eq!(result, b"<xml/>");
         }
     }
 }
