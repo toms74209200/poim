@@ -4,6 +4,8 @@ const OPF_MEDIA_TYPE: &[u8] = b"application/oebps-package+xml";
 pub enum EpubError {
     ContainerNotFound,
     RootfileNotFound,
+    SpineNotFound,
+    ManifestItemNotFound,
     ZipError(crate::zip::ZipError),
 }
 
@@ -34,6 +36,53 @@ pub fn find_opf_path_from_epub(data: &[u8]) -> Result<String, EpubError> {
     let container = crate::zip::extract_by_name(data, b"META-INF/container.xml")
         .map_err(EpubError::ZipError)?;
     find_opf_path(&container)
+}
+
+pub fn parse_spine(opf_xml: &[u8]) -> Result<Vec<String>, EpubError> {
+    let xml = core::str::from_utf8(opf_xml).map_err(|_| EpubError::SpineNotFound)?;
+
+    let mut manifest: Vec<(&str, &str)> = Vec::new();
+    let mut search_from = 0;
+    while let Some(tag_start) = find_tag_start(xml, "item", search_from) {
+        let tag_end = match xml[tag_start..].find('>') {
+            Some(pos) => tag_start + pos,
+            None => break,
+        };
+        let tag = &xml[tag_start..=tag_end];
+
+        if let Some(id) = extract_attribute(tag, "id")
+            && let Some(href) = extract_attribute(tag, "href")
+        {
+            manifest.push((id, href));
+        }
+        search_from = tag_end;
+    }
+
+    let mut spine_hrefs: Vec<String> = Vec::new();
+    search_from = 0;
+    while let Some(tag_start) = find_tag_start(xml, "itemref", search_from) {
+        let tag_end = match xml[tag_start..].find('>') {
+            Some(pos) => tag_start + pos,
+            None => break,
+        };
+        let tag = &xml[tag_start..=tag_end];
+
+        if let Some(idref) = extract_attribute(tag, "idref") {
+            let href = manifest
+                .iter()
+                .find(|(id, _)| *id == idref)
+                .map(|(_, href)| *href)
+                .ok_or(EpubError::ManifestItemNotFound)?;
+            spine_hrefs.push(href.to_string());
+        }
+        search_from = tag_end;
+    }
+
+    if spine_hrefs.is_empty() {
+        return Err(EpubError::SpineNotFound);
+    }
+
+    Ok(spine_hrefs)
 }
 
 fn find_tag_start(xml: &str, tag_name: &str, from: usize) -> Option<usize> {
@@ -183,6 +232,102 @@ mod tests {
             let xml = br#"<container><rootfiles><rootfile full-path="doc.pdf" media-type="application/pdf"/></rootfiles></container>"#;
 
             assert_eq!(find_opf_path(xml), Err(EpubError::RootfileNotFound));
+        }
+    }
+
+    mod parse_spine {
+        use super::*;
+
+        #[test]
+        fn when_parse_with_standard_opf_then_returns_hrefs_in_spine_order() {
+            let opf = br#"<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0">
+  <manifest>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch3" href="chapter3.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch3"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>"#;
+
+            let hrefs = parse_spine(opf).unwrap();
+
+            assert_eq!(
+                hrefs,
+                vec!["chapter1.xhtml", "chapter3.xhtml", "chapter2.xhtml"]
+            );
+        }
+
+        #[test]
+        fn when_parse_with_single_spine_item_then_returns_single_href() {
+            let opf = br#"<package>
+  <manifest><item id="content" href="main.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="content"/></spine>
+</package>"#;
+
+            let hrefs = parse_spine(opf).unwrap();
+
+            assert_eq!(hrefs, vec!["main.xhtml"]);
+        }
+
+        #[test]
+        fn when_parse_with_nested_href_then_returns_full_path() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="Text/chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+
+            let hrefs = parse_spine(opf).unwrap();
+
+            assert_eq!(hrefs, vec!["Text/chapter1.xhtml"]);
+        }
+
+        #[test]
+        fn when_parse_with_no_spine_then_returns_error() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+</package>"#;
+
+            assert_eq!(parse_spine(opf), Err(EpubError::SpineNotFound));
+        }
+
+        #[test]
+        fn when_parse_with_empty_spine_then_returns_error() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine></spine>
+</package>"#;
+
+            assert_eq!(parse_spine(opf), Err(EpubError::SpineNotFound));
+        }
+
+        #[test]
+        fn when_parse_with_unresolved_idref_then_returns_error() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="missing"/></spine>
+</package>"#;
+
+            assert_eq!(parse_spine(opf), Err(EpubError::ManifestItemNotFound));
+        }
+
+        #[test]
+        fn when_parse_with_manifest_items_without_href_then_skips_them() {
+            let opf = br#"<package>
+  <manifest>
+    <item id="toc" media-type="application/x-dtbncx+xml"/>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+
+            let hrefs = parse_spine(opf).unwrap();
+
+            assert_eq!(hrefs, vec!["chapter1.xhtml"]);
         }
     }
 
