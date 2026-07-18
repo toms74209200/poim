@@ -89,26 +89,23 @@ fn find_tag_start(xml: &str, tag_name: &str, from: usize) -> Option<usize> {
     let haystack = &xml[from..];
     let mut pos = 0;
     while pos < haystack.len() {
-        if let Some(lt) = haystack[pos..].find('<') {
-            let abs = pos + lt;
-            let after_lt = abs + 1;
-            if after_lt >= haystack.len() {
-                return None;
-            }
-            let rest = &haystack[after_lt..];
-            if rest.starts_with(tag_name)
-                && rest.len() > tag_name.len()
-                && matches!(
-                    rest.as_bytes()[tag_name.len()],
-                    b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'
-                )
-            {
-                return Some(from + abs);
-            }
-            pos = abs + 1;
-        } else {
+        let lt = haystack[pos..].find('<')?;
+        let abs = pos + lt;
+        let after_lt = abs + 1;
+        if after_lt >= haystack.len() {
             return None;
         }
+        let rest = &haystack[after_lt..];
+        if rest.starts_with(tag_name)
+            && rest.len() > tag_name.len()
+            && matches!(
+                rest.as_bytes()[tag_name.len()],
+                b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'
+            )
+        {
+            return Some(from + abs);
+        }
+        pos = abs + 1;
     }
     None
 }
