@@ -24,11 +24,8 @@ pub fn parse_headings(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        let text = strip_tags(&xml[content_start..content_end]);
-        blocks.push(Block::Heading {
-            level,
-            content: vec![Inline::Text(text)],
-        });
+        let content = parse_inline(&xml[content_start..content_end]);
+        blocks.push(Block::Heading { level, content });
 
         search_from = content_end + close_tag.len();
     }
@@ -59,10 +56,8 @@ pub fn parse_paragraphs(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        let text = strip_tags(&xml[content_start..content_end]);
-        blocks.push(Block::Paragraph {
-            content: vec![Inline::Text(text)],
-        });
+        let content = parse_inline(&xml[content_start..content_end]);
+        blocks.push(Block::Paragraph { content });
 
         search_from = content_end + "</p>".len();
     }
@@ -134,10 +129,8 @@ fn parse_list_items(xml: &str) -> Vec<ListItem> {
             }
         };
 
-        let text = strip_tags(&xml[content_start..content_end]);
-        items.push(ListItem {
-            content: vec![Inline::Text(text)],
-        });
+        let content = parse_inline(&xml[content_start..content_end]);
+        items.push(ListItem { content });
 
         search_from = content_end + "</li>".len();
     }
@@ -194,18 +187,131 @@ fn find_heading_start(xml: &str, from: usize) -> Option<(usize, u8)> {
     None
 }
 
-fn strip_tags(s: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
+pub fn parse_inline(xml: &str) -> Vec<Inline> {
+    let mut inlines = Vec::new();
+    let mut text_buf = String::new();
+    let mut pos = 0;
+
+    while pos < xml.len() {
+        match xml[pos..].find('<') {
+            None => {
+                text_buf.push_str(&xml[pos..]);
+                break;
+            }
+            Some(rel) => {
+                let lt = pos + rel;
+                text_buf.push_str(&xml[pos..lt]);
+
+                match match_recognized_open_tag(xml, lt) {
+                    Some((tag, href, content_start)) => {
+                        let close_tag = format!("</{tag}>");
+                        match xml[content_start..].find(&close_tag) {
+                            Some(close_rel) => {
+                                if !text_buf.is_empty() {
+                                    inlines.push(Inline::Text(core::mem::take(&mut text_buf)));
+                                }
+                                let content_end = content_start + close_rel;
+                                let inner = parse_inline(&xml[content_start..content_end]);
+                                inlines.push(match tag {
+                                    "em" => Inline::Emphasis(inner),
+                                    "strong" => Inline::Strong(inner),
+                                    "a" => Inline::Link {
+                                        href: href.unwrap_or_default(),
+                                        content: inner,
+                                    },
+                                    _ => unreachable!(),
+                                });
+                                pos = content_end + close_tag.len();
+                            }
+                            None => pos = content_start,
+                        }
+                    }
+                    None => match xml[lt..].find('>') {
+                        Some(gt_rel) => pos = lt + gt_rel + 1,
+                        None => {
+                            text_buf.push_str(&xml[lt..]);
+                            break;
+                        }
+                    },
+                }
+            }
         }
     }
-    result.trim().to_string()
+
+    if !text_buf.is_empty() {
+        inlines.push(Inline::Text(text_buf));
+    }
+
+    trim_edges(inlines)
+}
+
+fn trim_edges(mut inlines: Vec<Inline>) -> Vec<Inline> {
+    if let Some(Inline::Text(first)) = inlines.first_mut() {
+        *first = first.trim_start().to_string();
+    }
+    if let Some(Inline::Text(last)) = inlines.last_mut() {
+        *last = last.trim_end().to_string();
+    }
+    inlines.retain(|inline| !matches!(inline, Inline::Text(text) if text.is_empty()));
+    inlines
+}
+
+fn match_recognized_open_tag(
+    xml: &str,
+    lt: usize,
+) -> Option<(&'static str, Option<String>, usize)> {
+    let rest = &xml[lt + 1..];
+    for tag in ["strong", "em", "a"] {
+        if rest.len() > tag.len()
+            && rest.starts_with(tag)
+            && matches!(
+                rest.as_bytes()[tag.len()],
+                b' ' | b'\t' | b'\n' | b'\r' | b'>'
+            )
+        {
+            let tag_end_rel = rest.find('>')?;
+            let full_tag = &rest[..tag_end_rel];
+            let href = if tag == "a" {
+                extract_attribute(full_tag, "href").map(|s| s.to_string())
+            } else {
+                None
+            };
+            let content_start = lt + 1 + tag_end_rel + 1;
+            return Some((tag, href, content_start));
+        }
+    }
+    None
+}
+
+fn extract_attribute<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
+    let mut search = tag;
+    loop {
+        let pos = search.find(attr_name)?;
+        let before = if pos > 0 {
+            search.as_bytes()[pos - 1]
+        } else {
+            b' '
+        };
+        if !matches!(before, b' ' | b'\t' | b'\n' | b'\r') {
+            search = &search[pos + attr_name.len()..];
+            continue;
+        }
+
+        let after_name = &search[pos + attr_name.len()..];
+        let after_name = after_name.trim_start();
+        if !after_name.starts_with('=') {
+            search = after_name;
+            continue;
+        }
+        let after_eq = after_name[1..].trim_start();
+        let quote = after_eq.as_bytes().first()?;
+        if *quote != b'"' && *quote != b'\'' {
+            return None;
+        }
+        let value_start = &after_eq[1..];
+        let end = value_start.find(*quote as char)?;
+        return Some(&value_start[..end]);
+    }
 }
 
 #[cfg(test)]
@@ -267,8 +373,8 @@ mod tests {
         }
 
         #[test]
-        fn when_heading_has_nested_tags_then_strips_them_from_text() {
-            let xhtml = b"<h1>Hello <em>World</em></h1>";
+        fn when_heading_has_unrecognized_nested_tags_then_strips_them_from_text() {
+            let xhtml = b"<h1>Hello <span>World</span></h1>";
 
             let blocks = parse_headings(xhtml);
 
@@ -277,6 +383,24 @@ mod tests {
                 vec![Block::Heading {
                     level: 1,
                     content: vec![Inline::Text("Hello World".to_string())],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_heading_has_emphasis_then_returns_structured_inline() {
+            let xhtml = b"<h1>Hello <em>World</em></h1>";
+
+            let blocks = parse_headings(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Heading {
+                    level: 1,
+                    content: vec![
+                        Inline::Text("Hello ".to_string()),
+                        Inline::Emphasis(vec![Inline::Text("World".to_string())]),
+                    ],
                 }]
             );
         }
@@ -406,8 +530,8 @@ mod tests {
         }
 
         #[test]
-        fn when_paragraph_has_nested_tags_then_strips_them_from_text() {
-            let xhtml = b"<p>Hello <em>World</em>.</p>";
+        fn when_paragraph_has_unrecognized_nested_tags_then_strips_them_from_text() {
+            let xhtml = b"<p>Hello <span>World</span>.</p>";
 
             let blocks = parse_paragraphs(xhtml);
 
@@ -415,6 +539,29 @@ mod tests {
                 blocks,
                 vec![Block::Paragraph {
                     content: vec![Inline::Text("Hello World.".to_string())],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_paragraph_has_link_and_strong_then_returns_structured_inline() {
+            let xhtml = br#"<p>Visit <a href="https://example.com">here</a> for <strong>details</strong>.</p>"#;
+
+            let blocks = parse_paragraphs(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Paragraph {
+                    content: vec![
+                        Inline::Text("Visit ".to_string()),
+                        Inline::Link {
+                            href: "https://example.com".to_string(),
+                            content: vec![Inline::Text("here".to_string())],
+                        },
+                        Inline::Text(" for ".to_string()),
+                        Inline::Strong(vec![Inline::Text("details".to_string())]),
+                        Inline::Text(".".to_string()),
+                    ],
                 }]
             );
         }
@@ -507,8 +654,8 @@ mod tests {
         }
 
         #[test]
-        fn when_list_item_has_nested_tags_then_strips_them_from_text() {
-            let xhtml = b"<ul><li>Hello <em>World</em></li></ul>";
+        fn when_list_item_has_unrecognized_nested_tags_then_strips_them_from_text() {
+            let xhtml = b"<ul><li>Hello <span>World</span></li></ul>";
 
             let blocks = parse_lists(xhtml);
 
@@ -518,6 +665,29 @@ mod tests {
                     ordered: false,
                     items: vec![ListItem {
                         content: vec![Inline::Text("Hello World".to_string())],
+                    }],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_list_item_has_link_then_returns_structured_inline() {
+            let xhtml = br#"<ul><li>See <a href="chapter2.xhtml">Chapter 2</a></li></ul>"#;
+
+            let blocks = parse_lists(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::List {
+                    ordered: false,
+                    items: vec![ListItem {
+                        content: vec![
+                            Inline::Text("See ".to_string()),
+                            Inline::Link {
+                                href: "chapter2.xhtml".to_string(),
+                                content: vec![Inline::Text("Chapter 2".to_string())],
+                            },
+                        ],
                     }],
                 }]
             );
@@ -559,6 +729,147 @@ mod tests {
             let xhtml = b"\xff\xfe<ul><li>Bad</li></ul>";
 
             assert_eq!(parse_lists(xhtml), vec![]);
+        }
+    }
+
+    mod parse_inline {
+        use super::*;
+
+        #[test]
+        fn when_plain_text_then_returns_single_text_inline() {
+            let inlines = parse_inline("Hello world");
+
+            assert_eq!(inlines, vec![Inline::Text("Hello world".to_string())]);
+        }
+
+        #[test]
+        fn when_link_then_returns_link_inline_with_href() {
+            let inlines = parse_inline(r#"<a href="https://example.com">here</a>"#);
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Link {
+                    href: "https://example.com".to_string(),
+                    content: vec![Inline::Text("here".to_string())],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_link_has_no_href_then_returns_empty_href() {
+            let inlines = parse_inline("<a>here</a>");
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Link {
+                    href: String::new(),
+                    content: vec![Inline::Text("here".to_string())],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_emphasis_then_returns_emphasis_inline() {
+            let inlines = parse_inline("<em>World</em>");
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Emphasis(vec![Inline::Text("World".to_string())])]
+            );
+        }
+
+        #[test]
+        fn when_strong_then_returns_strong_inline() {
+            let inlines = parse_inline("<strong>World</strong>");
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Strong(vec![Inline::Text("World".to_string())])]
+            );
+        }
+
+        #[test]
+        fn when_strong_nested_in_emphasis_then_returns_nested_inline() {
+            let inlines = parse_inline("<em>very <strong>important</strong></em>");
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Emphasis(vec![
+                    Inline::Text("very ".to_string()),
+                    Inline::Strong(vec![Inline::Text("important".to_string())]),
+                ])]
+            );
+        }
+
+        #[test]
+        fn when_emphasis_nested_in_link_then_returns_nested_inline() {
+            let inlines = parse_inline(r#"<a href="x.xhtml"><em>Chapter</em></a>"#);
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Link {
+                    href: "x.xhtml".to_string(),
+                    content: vec![Inline::Emphasis(vec![Inline::Text("Chapter".to_string())])],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_unrecognized_tag_then_strips_tag_but_keeps_text() {
+            let inlines = parse_inline("Hello <span>World</span>");
+
+            assert_eq!(inlines, vec![Inline::Text("Hello World".to_string())]);
+        }
+
+        #[test]
+        fn when_multiple_inlines_in_sequence_then_returns_all_in_order() {
+            let inlines = parse_inline("A <em>B</em> C <strong>D</strong> E");
+
+            assert_eq!(
+                inlines,
+                vec![
+                    Inline::Text("A ".to_string()),
+                    Inline::Emphasis(vec![Inline::Text("B".to_string())]),
+                    Inline::Text(" C ".to_string()),
+                    Inline::Strong(vec![Inline::Text("D".to_string())]),
+                    Inline::Text(" E".to_string()),
+                ]
+            );
+        }
+
+        #[test]
+        fn when_empty_string_then_returns_empty() {
+            assert_eq!(parse_inline(""), vec![]);
+        }
+
+        #[test]
+        fn when_unclosed_recognized_tag_then_ignored() {
+            let inlines = parse_inline("Hello <em>World");
+
+            assert_eq!(inlines, vec![Inline::Text("Hello World".to_string())]);
+        }
+
+        #[test]
+        fn when_surrounding_whitespace_then_trims_outer_edges_only() {
+            let inlines = parse_inline("\n  Hello <em>World</em>  \n");
+
+            assert_eq!(
+                inlines,
+                vec![
+                    Inline::Text("Hello ".to_string()),
+                    Inline::Emphasis(vec![Inline::Text("World".to_string())]),
+                ]
+            );
+        }
+
+        #[test]
+        fn when_trailing_whitespace_becomes_empty_after_trim_then_removed() {
+            let inlines = parse_inline("<em>World</em>  \n");
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Emphasis(vec![Inline::Text("World".to_string())])]
+            );
         }
     }
 }
