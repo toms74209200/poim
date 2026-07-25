@@ -138,6 +138,119 @@ fn parse_list_items(xml: &str) -> Vec<ListItem> {
     items
 }
 
+pub fn parse_tables(xhtml: &[u8]) -> Vec<Block> {
+    let xml = match core::str::from_utf8(xhtml) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut blocks = Vec::new();
+    let mut search_from = 0;
+    while let Some(tag_start) = find_open_tag(xml, "table", search_from) {
+        let tag_end = match xml[tag_start..].find('>') {
+            Some(pos) => tag_start + pos,
+            None => break,
+        };
+
+        let content_start = tag_end + 1;
+        let content_end = match xml[content_start..].find("</table>") {
+            Some(pos) => content_start + pos,
+            None => {
+                search_from = tag_end + 1;
+                continue;
+            }
+        };
+
+        if let Some(block) = parse_table_content(&xml[content_start..content_end]) {
+            blocks.push(block);
+        }
+
+        search_from = content_end + "</table>".len();
+    }
+
+    blocks
+}
+
+fn parse_table_content(xml: &str) -> Option<Block> {
+    let mut headers: Vec<Vec<Inline>> = Vec::new();
+    let mut rows: Vec<Vec<Vec<Inline>>> = Vec::new();
+
+    let mut search_from = 0;
+    while let Some(tag_start) = find_open_tag(xml, "tr", search_from) {
+        let tag_end = match xml[tag_start..].find('>') {
+            Some(pos) => tag_start + pos,
+            None => break,
+        };
+
+        let content_start = tag_end + 1;
+        let content_end = match xml[content_start..].find("</tr>") {
+            Some(pos) => content_start + pos,
+            None => {
+                search_from = tag_end + 1;
+                continue;
+            }
+        };
+
+        let (cells, has_header_cell) = parse_row_cells(&xml[content_start..content_end]);
+        if has_header_cell && headers.is_empty() && rows.is_empty() {
+            headers = cells;
+        } else if !cells.is_empty() {
+            rows.push(cells);
+        }
+
+        search_from = content_end + "</tr>".len();
+    }
+
+    if headers.is_empty() && rows.is_empty() {
+        return None;
+    }
+
+    Some(Block::Table { headers, rows })
+}
+
+fn parse_row_cells(xml: &str) -> (Vec<Vec<Inline>>, bool) {
+    let mut cells = Vec::new();
+    let mut has_header_cell = false;
+
+    let mut search_from = 0;
+    loop {
+        let (tag_start, tag_name) = match (
+            find_open_tag(xml, "th", search_from),
+            find_open_tag(xml, "td", search_from),
+        ) {
+            (Some(h), Some(d)) if h < d => (h, "th"),
+            (Some(_), Some(d)) => (d, "td"),
+            (Some(h), None) => (h, "th"),
+            (None, Some(d)) => (d, "td"),
+            (None, None) => break,
+        };
+
+        let tag_end = match xml[tag_start..].find('>') {
+            Some(pos) => tag_start + pos,
+            None => break,
+        };
+
+        let close_tag = format!("</{tag_name}>");
+        let content_start = tag_end + 1;
+        let content_end = match xml[content_start..].find(&close_tag) {
+            Some(pos) => content_start + pos,
+            None => {
+                search_from = tag_end + 1;
+                continue;
+            }
+        };
+
+        if tag_name == "th" {
+            has_header_cell = true;
+        }
+        cells.push(parse_inline(&xml[content_start..content_end]));
+
+        search_from = content_end + close_tag.len();
+    }
+
+    (cells, has_header_cell)
+}
+
 fn find_open_tag(xml: &str, tag_name: &str, from: usize) -> Option<usize> {
     let haystack = &xml[from..];
     let mut pos = 0;
@@ -729,6 +842,174 @@ mod tests {
             let xhtml = b"\xff\xfe<ul><li>Bad</li></ul>";
 
             assert_eq!(parse_lists(xhtml), vec![]);
+        }
+    }
+
+    mod parse_tables {
+        use super::*;
+
+        #[test]
+        fn when_table_with_header_and_rows_then_returns_table_block() {
+            let xhtml = b"<table>
+  <tr><th>Name</th><th>Age</th></tr>
+  <tr><td>Alice</td><td>30</td></tr>
+  <tr><td>Bob</td><td>25</td></tr>
+</table>";
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Table {
+                    headers: vec![
+                        vec![Inline::Text("Name".to_string())],
+                        vec![Inline::Text("Age".to_string())],
+                    ],
+                    rows: vec![
+                        vec![
+                            vec![Inline::Text("Alice".to_string())],
+                            vec![Inline::Text("30".to_string())],
+                        ],
+                        vec![
+                            vec![Inline::Text("Bob".to_string())],
+                            vec![Inline::Text("25".to_string())],
+                        ],
+                    ],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_table_wrapped_in_thead_and_tbody_then_still_parsed() {
+            let xhtml = b"<table>
+  <thead><tr><th>Key</th></tr></thead>
+  <tbody><tr><td>Value</td></tr></tbody>
+</table>";
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Table {
+                    headers: vec![vec![Inline::Text("Key".to_string())]],
+                    rows: vec![vec![vec![Inline::Text("Value".to_string())]]],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_table_has_no_header_row_then_returns_empty_headers() {
+            let xhtml = b"<table><tr><td>A</td><td>B</td></tr></table>";
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Table {
+                    headers: vec![],
+                    rows: vec![vec![
+                        vec![Inline::Text("A".to_string())],
+                        vec![Inline::Text("B".to_string())],
+                    ]],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_cell_has_inline_markup_then_returns_structured_inline() {
+            let xhtml = br#"<table><tr><td>See <a href="x.xhtml">link</a></td></tr></table>"#;
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Table {
+                    headers: vec![],
+                    rows: vec![vec![vec![
+                        Inline::Text("See ".to_string()),
+                        Inline::Link {
+                            href: "x.xhtml".to_string(),
+                            content: vec![Inline::Text("link".to_string())],
+                        },
+                    ]]],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_table_has_attributes_then_still_parsed() {
+            let xhtml = br#"<table class="data"><tr><td>Cell</td></tr></table>"#;
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Table {
+                    headers: vec![],
+                    rows: vec![vec![vec![Inline::Text("Cell".to_string())]]],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_multiple_tables_then_returns_in_document_order() {
+            let xhtml =
+                b"<table><tr><td>A</td></tr></table><p>gap</p><table><tr><td>B</td></tr></table>";
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::Table {
+                        headers: vec![],
+                        rows: vec![vec![vec![Inline::Text("A".to_string())]]],
+                    },
+                    Block::Table {
+                        headers: vec![],
+                        rows: vec![vec![vec![Inline::Text("B".to_string())]]],
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_header_row_appears_after_data_row_then_treated_as_data_row() {
+            let xhtml = b"<table><tr><td>A</td></tr><tr><th>H</th></tr></table>";
+
+            let blocks = parse_tables(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Table {
+                    headers: vec![],
+                    rows: vec![
+                        vec![vec![Inline::Text("A".to_string())]],
+                        vec![vec![Inline::Text("H".to_string())]],
+                    ],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_table_is_empty_then_returns_empty() {
+            let xhtml = b"<table></table>";
+
+            assert_eq!(parse_tables(xhtml), vec![]);
+        }
+
+        #[test]
+        fn when_no_tables_then_returns_empty() {
+            let xhtml = b"<p>No tables here</p>";
+
+            assert_eq!(parse_tables(xhtml), vec![]);
+        }
+
+        #[test]
+        fn when_invalid_utf8_then_returns_empty() {
+            let xhtml = b"\xff\xfe<table><tr><td>Bad</td></tr></table>";
+
+            assert_eq!(parse_tables(xhtml), vec![]);
         }
     }
 
