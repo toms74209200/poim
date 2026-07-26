@@ -251,6 +251,36 @@ fn parse_row_cells(xml: &str) -> (Vec<Vec<Inline>>, bool) {
     (cells, has_header_cell)
 }
 
+pub fn parse_images(xhtml: &[u8]) -> Vec<Block> {
+    let xml = match core::str::from_utf8(xhtml) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut blocks = Vec::new();
+    let mut search_from = 0;
+    while let Some(tag_start) = find_open_tag(xml, "img", search_from) {
+        let tag_end = match xml[tag_start..].find('>') {
+            Some(pos) => tag_start + pos,
+            None => break,
+        };
+        let tag = &xml[tag_start..=tag_end];
+
+        if let Some(src) = extract_attribute(tag, "src") {
+            blocks.push(Block::Image {
+                src: src.to_string(),
+                alt: extract_attribute(tag, "alt")
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+        }
+
+        search_from = tag_end + 1;
+    }
+
+    blocks
+}
+
 fn find_open_tag(xml: &str, tag_name: &str, from: usize) -> Option<usize> {
     let haystack = &xml[from..];
     let mut pos = 0;
@@ -1010,6 +1040,143 @@ mod tests {
             let xhtml = b"\xff\xfe<table><tr><td>Bad</td></tr></table>";
 
             assert_eq!(parse_tables(xhtml), vec![]);
+        }
+    }
+
+    mod parse_images {
+        use super::*;
+
+        #[test]
+        fn when_self_closing_img_then_returns_image_block() {
+            let xhtml = br#"<img src="cover.jpg" alt="Cover"/>"#;
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "cover.jpg".to_string(),
+                    alt: "Cover".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_img_without_alt_then_returns_empty_alt() {
+            let xhtml = br#"<img src="figure1.png"/>"#;
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "figure1.png".to_string(),
+                    alt: String::new(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_img_without_src_then_skipped() {
+            let xhtml = br#"<img alt="orphan"/>"#;
+
+            assert_eq!(parse_images(xhtml), vec![]);
+        }
+
+        #[test]
+        fn when_attributes_in_reversed_order_then_still_parsed() {
+            let xhtml = br#"<img alt="Cover" src="cover.jpg"/>"#;
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "cover.jpg".to_string(),
+                    alt: "Cover".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_nested_path_then_returns_full_path() {
+            let xhtml = br#"<img src="Images/ch1/figure1.png" alt="Figure 1"/>"#;
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "Images/ch1/figure1.png".to_string(),
+                    alt: "Figure 1".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_multiple_images_then_returns_in_document_order() {
+            let xhtml =
+                br#"<p>text</p><img src="a.png" alt="A"/><p>gap</p><img src="b.png" alt="B"/>"#;
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::Image {
+                        src: "a.png".to_string(),
+                        alt: "A".to_string(),
+                    },
+                    Block::Image {
+                        src: "b.png".to_string(),
+                        alt: "B".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_single_quoted_attributes_then_returns_values() {
+            let xhtml = b"<img src='cover.jpg' alt='Cover'/>";
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "cover.jpg".to_string(),
+                    alt: "Cover".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_similarly_named_attribute_then_not_mistaken_for_src() {
+            let xhtml = br#"<img data-src="wrong.png" src="right.png"/>"#;
+
+            let blocks = parse_images(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "right.png".to_string(),
+                    alt: String::new(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_no_images_then_returns_empty() {
+            let xhtml = b"<p>No images here</p>";
+
+            assert_eq!(parse_images(xhtml), vec![]);
+        }
+
+        #[test]
+        fn when_invalid_utf8_then_returns_empty() {
+            let xhtml = b"\xff\xfe<img src=\"bad.png\"/>";
+
+            assert_eq!(parse_images(xhtml), vec![]);
         }
     }
 
