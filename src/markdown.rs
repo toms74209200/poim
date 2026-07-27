@@ -8,6 +8,10 @@ pub fn emit_heading(level: u8, content: &[Inline]) -> String {
     format!("{hashes} {}", emit_inline(content))
 }
 
+pub fn emit_paragraph(content: &[Inline]) -> String {
+    emit_inline(content)
+}
+
 fn emit_inline(content: &[Inline]) -> String {
     let mut result = String::new();
     for inline in content {
@@ -96,6 +100,63 @@ mod tests {
         #[test]
         fn when_content_is_empty_then_emits_hashes_only() {
             assert_eq!(emit_heading(1, &[]), "# ");
+        }
+    }
+
+    mod emit_paragraph {
+        use super::*;
+
+        #[test]
+        fn when_plain_text_then_emits_text_as_is() {
+            let content = vec![Inline::Text("Hello world.".to_string())];
+
+            assert_eq!(emit_paragraph(&content), "Hello world.");
+        }
+
+        #[test]
+        fn when_content_has_multiple_text_inlines_then_concatenates_them() {
+            let content = vec![
+                Inline::Text("Hello ".to_string()),
+                Inline::Text("world.".to_string()),
+            ];
+
+            assert_eq!(emit_paragraph(&content), "Hello world.");
+        }
+
+        #[test]
+        fn when_content_has_emphasis_then_emits_inner_text() {
+            let content = vec![
+                Inline::Text("Hello ".to_string()),
+                Inline::Emphasis(vec![Inline::Text("world".to_string())]),
+                Inline::Text(".".to_string()),
+            ];
+
+            assert_eq!(emit_paragraph(&content), "Hello world.");
+        }
+
+        #[test]
+        fn when_content_has_strong_then_emits_inner_text() {
+            let content = vec![Inline::Strong(vec![Inline::Text("important".to_string())])];
+
+            assert_eq!(emit_paragraph(&content), "important");
+        }
+
+        #[test]
+        fn when_content_has_link_then_emits_inner_text() {
+            let content = vec![
+                Inline::Text("Visit ".to_string()),
+                Inline::Link {
+                    href: "https://example.com".to_string(),
+                    content: vec![Inline::Text("here".to_string())],
+                },
+            ];
+
+            assert_eq!(emit_paragraph(&content), "Visit here");
+        }
+
+        #[test]
+        fn when_content_is_empty_then_emits_empty_string() {
+            assert_eq!(emit_paragraph(&[]), "");
         }
     }
 }
