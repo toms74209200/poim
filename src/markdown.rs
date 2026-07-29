@@ -28,14 +28,26 @@ pub fn emit_list(ordered: bool, items: &[ListItem]) -> String {
         .join("\n")
 }
 
-fn emit_inline(content: &[Inline]) -> String {
+pub fn emit_inline(content: &[Inline]) -> String {
     let mut result = String::new();
     for inline in content {
         match inline {
             Inline::Text(text) => result.push_str(text),
-            Inline::Emphasis(inner) => result.push_str(&emit_inline(inner)),
-            Inline::Strong(inner) => result.push_str(&emit_inline(inner)),
-            Inline::Link { content, .. } => result.push_str(&emit_inline(content)),
+            Inline::Emphasis(inner) => {
+                let inner = emit_inline(inner);
+                if !inner.is_empty() {
+                    result.push_str(&format!("*{inner}*"));
+                }
+            }
+            Inline::Strong(inner) => {
+                let inner = emit_inline(inner);
+                if !inner.is_empty() {
+                    result.push_str(&format!("**{inner}**"));
+                }
+            }
+            Inline::Link { href, content } => {
+                result.push_str(&format!("[{}]({href})", emit_inline(content)));
+            }
         }
     }
     result
@@ -94,23 +106,23 @@ mod tests {
         }
 
         #[test]
-        fn when_content_has_emphasis_then_emits_inner_text() {
+        fn when_content_has_emphasis_then_emits_emphasis_markers() {
             let content = vec![
                 Inline::Text("Hello ".to_string()),
                 Inline::Emphasis(vec![Inline::Text("World".to_string())]),
             ];
 
-            assert_eq!(emit_heading(1, &content), "# Hello World");
+            assert_eq!(emit_heading(1, &content), "# Hello *World*");
         }
 
         #[test]
-        fn when_content_has_link_then_emits_inner_text() {
+        fn when_content_has_link_then_emits_link_syntax() {
             let content = vec![Inline::Link {
                 href: "https://example.com".to_string(),
                 content: vec![Inline::Text("here".to_string())],
             }];
 
-            assert_eq!(emit_heading(2, &content), "## here");
+            assert_eq!(emit_heading(2, &content), "## [here](https://example.com)");
         }
 
         #[test]
@@ -140,25 +152,25 @@ mod tests {
         }
 
         #[test]
-        fn when_content_has_emphasis_then_emits_inner_text() {
+        fn when_content_has_emphasis_then_emits_emphasis_markers() {
             let content = vec![
                 Inline::Text("Hello ".to_string()),
                 Inline::Emphasis(vec![Inline::Text("world".to_string())]),
                 Inline::Text(".".to_string()),
             ];
 
-            assert_eq!(emit_paragraph(&content), "Hello world.");
+            assert_eq!(emit_paragraph(&content), "Hello *world*.");
         }
 
         #[test]
-        fn when_content_has_strong_then_emits_inner_text() {
+        fn when_content_has_strong_then_emits_strong_markers() {
             let content = vec![Inline::Strong(vec![Inline::Text("important".to_string())])];
 
-            assert_eq!(emit_paragraph(&content), "important");
+            assert_eq!(emit_paragraph(&content), "**important**");
         }
 
         #[test]
-        fn when_content_has_link_then_emits_inner_text() {
+        fn when_content_has_link_then_emits_link_syntax() {
             let content = vec![
                 Inline::Text("Visit ".to_string()),
                 Inline::Link {
@@ -167,7 +179,10 @@ mod tests {
                 },
             ];
 
-            assert_eq!(emit_paragraph(&content), "Visit here");
+            assert_eq!(
+                emit_paragraph(&content),
+                "Visit [here](https://example.com)"
+            );
         }
 
         #[test]
@@ -207,7 +222,7 @@ mod tests {
         }
 
         #[test]
-        fn when_item_has_emphasis_then_emits_inner_text() {
+        fn when_item_has_emphasis_then_emits_emphasis_markers() {
             let items = vec![ListItem {
                 content: vec![
                     Inline::Text("Hello ".to_string()),
@@ -215,11 +230,11 @@ mod tests {
                 ],
             }];
 
-            assert_eq!(emit_list(false, &items), "- Hello World");
+            assert_eq!(emit_list(false, &items), "- Hello *World*");
         }
 
         #[test]
-        fn when_item_has_link_then_emits_inner_text() {
+        fn when_item_has_link_then_emits_link_syntax() {
             let items = vec![ListItem {
                 content: vec![
                     Inline::Text("See ".to_string()),
@@ -230,7 +245,10 @@ mod tests {
                 ],
             }];
 
-            assert_eq!(emit_list(true, &items), "1. See Chapter 2");
+            assert_eq!(
+                emit_list(true, &items),
+                "1. See [Chapter 2](chapter2.xhtml)"
+            );
         }
 
         #[test]
@@ -244,6 +262,102 @@ mod tests {
         fn when_no_items_then_emits_empty_string() {
             assert_eq!(emit_list(false, &[]), "");
             assert_eq!(emit_list(true, &[]), "");
+        }
+    }
+
+    mod emit_inline {
+        use super::*;
+
+        #[test]
+        fn when_plain_text_then_emits_text_as_is() {
+            let content = vec![Inline::Text("Hello".to_string())];
+
+            assert_eq!(emit_inline(&content), "Hello");
+        }
+
+        #[test]
+        fn when_emphasis_then_wraps_in_single_asterisks() {
+            let content = vec![Inline::Emphasis(vec![Inline::Text("World".to_string())])];
+
+            assert_eq!(emit_inline(&content), "*World*");
+        }
+
+        #[test]
+        fn when_strong_then_wraps_in_double_asterisks() {
+            let content = vec![Inline::Strong(vec![Inline::Text("World".to_string())])];
+
+            assert_eq!(emit_inline(&content), "**World**");
+        }
+
+        #[test]
+        fn when_link_then_emits_bracket_paren_syntax() {
+            let content = vec![Inline::Link {
+                href: "https://example.com".to_string(),
+                content: vec![Inline::Text("here".to_string())],
+            }];
+
+            assert_eq!(emit_inline(&content), "[here](https://example.com)");
+        }
+
+        #[test]
+        fn when_strong_nested_in_emphasis_then_nests_markers() {
+            let content = vec![Inline::Emphasis(vec![
+                Inline::Text("very ".to_string()),
+                Inline::Strong(vec![Inline::Text("important".to_string())]),
+            ])];
+
+            assert_eq!(emit_inline(&content), "*very **important***");
+        }
+
+        #[test]
+        fn when_emphasis_nested_in_link_then_nests_markers() {
+            let content = vec![Inline::Link {
+                href: "x.xhtml".to_string(),
+                content: vec![Inline::Emphasis(vec![Inline::Text("Chapter".to_string())])],
+            }];
+
+            assert_eq!(emit_inline(&content), "[*Chapter*](x.xhtml)");
+        }
+
+        #[test]
+        fn when_multiple_inlines_in_sequence_then_emits_all_in_order() {
+            let content = vec![
+                Inline::Text("A ".to_string()),
+                Inline::Emphasis(vec![Inline::Text("B".to_string())]),
+                Inline::Text(" C ".to_string()),
+                Inline::Strong(vec![Inline::Text("D".to_string())]),
+            ];
+
+            assert_eq!(emit_inline(&content), "A *B* C **D**");
+        }
+
+        #[test]
+        fn when_emphasis_content_is_empty_then_omits_markers() {
+            let content = vec![Inline::Emphasis(vec![])];
+
+            assert_eq!(emit_inline(&content), "");
+        }
+
+        #[test]
+        fn when_strong_content_is_empty_then_omits_markers() {
+            let content = vec![Inline::Strong(vec![])];
+
+            assert_eq!(emit_inline(&content), "");
+        }
+
+        #[test]
+        fn when_link_content_is_empty_then_still_emits_href() {
+            let content = vec![Inline::Link {
+                href: "cover.jpg".to_string(),
+                content: vec![],
+            }];
+
+            assert_eq!(emit_inline(&content), "[](cover.jpg)");
+        }
+
+        #[test]
+        fn when_content_is_empty_then_emits_empty_string() {
+            assert_eq!(emit_inline(&[]), "");
         }
     }
 }
