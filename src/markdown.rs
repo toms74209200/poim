@@ -28,6 +28,35 @@ pub fn emit_list(ordered: bool, items: &[ListItem]) -> String {
         .join("\n")
 }
 
+pub fn emit_table(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    let column_count = headers
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if column_count == 0 {
+        return String::new();
+    }
+
+    let mut lines = vec![
+        emit_row(headers, column_count),
+        format!("|{}", " --- |".repeat(column_count)),
+    ];
+    lines.extend(rows.iter().map(|row| emit_row(row, column_count)));
+    lines.join("\n")
+}
+
+fn emit_row(cells: &[Vec<Inline>], column_count: usize) -> String {
+    let mut result = String::from("|");
+    for index in 0..column_count {
+        let cell = cells.get(index).map(|c| emit_cell(c)).unwrap_or_default();
+        result.push_str(&format!(" {cell} |"));
+    }
+    result
+}
+
+fn emit_cell(content: &[Inline]) -> String {
+    emit_inline(content).replace('|', "\\|")
+}
+
 pub fn emit_inline(content: &[Inline]) -> String {
     let mut result = String::new();
     for inline in content {
@@ -262,6 +291,113 @@ mod tests {
         fn when_no_items_then_emits_empty_string() {
             assert_eq!(emit_list(false, &[]), "");
             assert_eq!(emit_list(true, &[]), "");
+        }
+    }
+
+    mod emit_table {
+        use super::*;
+
+        fn cell(text: &str) -> Vec<Inline> {
+            vec![Inline::Text(text.to_string())]
+        }
+
+        #[test]
+        fn when_headers_and_rows_then_emits_gfm_table() {
+            let headers = vec![cell("Name"), cell("Age")];
+            let rows = vec![
+                vec![cell("Alice"), cell("30")],
+                vec![cell("Bob"), cell("25")],
+            ];
+
+            assert_eq!(
+                emit_table(&headers, &rows),
+                "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |"
+            );
+        }
+
+        #[test]
+        fn when_single_column_then_emits_single_column_table() {
+            let headers = vec![cell("Key")];
+            let rows = vec![vec![cell("Value")]];
+
+            assert_eq!(emit_table(&headers, &rows), "| Key |\n| --- |\n| Value |");
+        }
+
+        #[test]
+        fn when_no_headers_then_emits_blank_header_row() {
+            let rows = vec![vec![cell("A"), cell("B")]];
+
+            assert_eq!(emit_table(&[], &rows), "|  |  |\n| --- | --- |\n| A | B |");
+        }
+
+        #[test]
+        fn when_headers_only_then_emits_header_and_separator() {
+            let headers = vec![cell("Name"), cell("Age")];
+
+            assert_eq!(emit_table(&headers, &[]), "| Name | Age |\n| --- | --- |");
+        }
+
+        #[test]
+        fn when_row_has_fewer_cells_then_pads_with_empty_cells() {
+            let headers = vec![cell("A"), cell("B"), cell("C")];
+            let rows = vec![vec![cell("1")]];
+
+            assert_eq!(
+                emit_table(&headers, &rows),
+                "| A | B | C |\n| --- | --- | --- |\n| 1 |  |  |"
+            );
+        }
+
+        #[test]
+        fn when_row_has_more_cells_than_headers_then_widens_table() {
+            let headers = vec![cell("A")];
+            let rows = vec![vec![cell("1"), cell("2")]];
+
+            assert_eq!(
+                emit_table(&headers, &rows),
+                "| A |  |\n| --- | --- |\n| 1 | 2 |"
+            );
+        }
+
+        #[test]
+        fn when_cell_has_inline_markup_then_emits_markup() {
+            let headers = vec![cell("Link")];
+            let rows = vec![vec![vec![Inline::Link {
+                href: "x.xhtml".to_string(),
+                content: vec![Inline::Text("here".to_string())],
+            }]]];
+
+            assert_eq!(
+                emit_table(&headers, &rows),
+                "| Link |\n| --- |\n| [here](x.xhtml) |"
+            );
+        }
+
+        #[test]
+        fn when_cell_contains_pipe_then_escapes_it() {
+            let headers = vec![cell("Expr")];
+            let rows = vec![vec![cell("a | b")]];
+
+            assert_eq!(
+                emit_table(&headers, &rows),
+                "| Expr |\n| --- |\n| a \\| b |"
+            );
+        }
+
+        #[test]
+        fn when_cell_is_empty_then_emits_blank_cell() {
+            let headers = vec![cell("A"), cell("B")];
+            let rows = vec![vec![vec![], cell("2")]];
+
+            assert_eq!(
+                emit_table(&headers, &rows),
+                "| A | B |\n| --- | --- |\n|  | 2 |"
+            );
+        }
+
+        #[test]
+        fn when_no_headers_and_no_rows_then_emits_empty_string() {
+            assert_eq!(emit_table(&[], &[]), "");
         }
     }
 
