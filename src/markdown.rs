@@ -1,4 +1,4 @@
-use crate::ir::{Inline, ListItem};
+use crate::ir::{Block, Inline, ListItem};
 
 const MAX_HEADING_LEVEL: u8 = 6;
 
@@ -55,6 +55,22 @@ fn emit_row(cells: &[Vec<Inline>], column_count: usize) -> String {
 
 fn emit_cell(content: &[Inline]) -> String {
     emit_inline(content).replace('|', "\\|")
+}
+
+pub fn emit_image(src: &str, alt: &str) -> String {
+    format!("![{alt}]({src})")
+}
+
+pub fn collect_image_sources(blocks: &[Block]) -> Vec<String> {
+    let mut sources: Vec<String> = Vec::new();
+    for block in blocks {
+        if let Block::Image { src, .. } = block
+            && !sources.iter().any(|seen| seen == src)
+        {
+            sources.push(src.clone());
+        }
+    }
+    sources
 }
 
 pub fn emit_inline(content: &[Inline]) -> String {
@@ -398,6 +414,83 @@ mod tests {
         #[test]
         fn when_no_headers_and_no_rows_then_emits_empty_string() {
             assert_eq!(emit_table(&[], &[]), "");
+        }
+    }
+
+    mod emit_image {
+        use super::*;
+
+        #[test]
+        fn when_src_and_alt_then_emits_image_syntax() {
+            assert_eq!(emit_image("cover.jpg", "Cover"), "![Cover](cover.jpg)");
+        }
+
+        #[test]
+        fn when_alt_is_empty_then_emits_empty_brackets() {
+            assert_eq!(emit_image("figure1.png", ""), "![](figure1.png)");
+        }
+
+        #[test]
+        fn when_nested_path_then_emits_full_path() {
+            assert_eq!(
+                emit_image("Images/ch1/figure1.png", "Figure 1"),
+                "![Figure 1](Images/ch1/figure1.png)"
+            );
+        }
+    }
+
+    mod collect_image_sources {
+        use super::*;
+
+        fn image(src: &str) -> Block {
+            Block::Image {
+                src: src.to_string(),
+                alt: String::new(),
+            }
+        }
+
+        #[test]
+        fn when_blocks_have_images_then_collects_sources_in_order() {
+            let blocks = vec![image("a.png"), image("b.png")];
+
+            assert_eq!(collect_image_sources(&blocks), vec!["a.png", "b.png"]);
+        }
+
+        #[test]
+        fn when_same_source_repeats_then_collects_it_once() {
+            let blocks = vec![image("a.png"), image("b.png"), image("a.png")];
+
+            assert_eq!(collect_image_sources(&blocks), vec!["a.png", "b.png"]);
+        }
+
+        #[test]
+        fn when_non_image_blocks_present_then_ignores_them() {
+            let blocks = vec![
+                Block::Paragraph {
+                    content: vec![Inline::Text("text".to_string())],
+                },
+                image("a.png"),
+                Block::Heading {
+                    level: 1,
+                    content: vec![Inline::Text("Title".to_string())],
+                },
+            ];
+
+            assert_eq!(collect_image_sources(&blocks), vec!["a.png"]);
+        }
+
+        #[test]
+        fn when_no_images_then_returns_empty() {
+            let blocks = vec![Block::Paragraph {
+                content: vec![Inline::Text("text".to_string())],
+            }];
+
+            assert_eq!(collect_image_sources(&blocks), Vec::<String>::new());
+        }
+
+        #[test]
+        fn when_no_blocks_then_returns_empty() {
+            assert_eq!(collect_image_sources(&[]), Vec::<String>::new());
         }
     }
 
