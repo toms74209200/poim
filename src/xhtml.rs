@@ -1,5 +1,124 @@
 use crate::ir::{Block, Inline, ListItem};
 
+enum BlockKind {
+    Heading(u8),
+    Paragraph,
+    List(bool),
+    Table,
+    Image,
+}
+
+pub fn parse_blocks(xhtml: &[u8]) -> Vec<Block> {
+    let xml = match core::str::from_utf8(xhtml) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut blocks = Vec::new();
+    let mut pos = 0;
+    while let Some((tag_start, kind)) = next_block_start(xml, pos) {
+        pos = match kind {
+            BlockKind::Heading(level) => {
+                match element_bounds(xml, tag_start, &format!("</h{level}>")) {
+                    Some((content_start, content_end, next)) => {
+                        blocks.push(Block::Heading {
+                            level,
+                            content: parse_inline(&xml[content_start..content_end]),
+                        });
+                        next
+                    }
+                    None => skip_open_tag(xml, tag_start),
+                }
+            }
+            BlockKind::Paragraph => match element_bounds(xml, tag_start, "</p>") {
+                Some((content_start, content_end, next)) => {
+                    let inner = &xml[content_start..content_end];
+                    let content = parse_inline(inner);
+                    if !content.is_empty() {
+                        blocks.push(Block::Paragraph { content });
+                    }
+                    blocks.extend(parse_images(inner.as_bytes()));
+                    next
+                }
+                None => skip_open_tag(xml, tag_start),
+            },
+            BlockKind::List(ordered) => {
+                let close_tag = if ordered { "</ol>" } else { "</ul>" };
+                match element_bounds(xml, tag_start, close_tag) {
+                    Some((content_start, content_end, next)) => {
+                        let items = parse_list_items(&xml[content_start..content_end]);
+                        if !items.is_empty() {
+                            blocks.push(Block::List { ordered, items });
+                        }
+                        next
+                    }
+                    None => skip_open_tag(xml, tag_start),
+                }
+            }
+            BlockKind::Table => match element_bounds(xml, tag_start, "</table>") {
+                Some((content_start, content_end, next)) => {
+                    if let Some(block) = parse_table_content(&xml[content_start..content_end]) {
+                        blocks.push(block);
+                    }
+                    next
+                }
+                None => skip_open_tag(xml, tag_start),
+            },
+            BlockKind::Image => {
+                let tag_end = match xml[tag_start..].find('>') {
+                    Some(rel) => tag_start + rel,
+                    None => break,
+                };
+                let tag = &xml[tag_start..=tag_end];
+                if let Some(src) = extract_attribute(tag, "src") {
+                    blocks.push(Block::Image {
+                        src: src.to_string(),
+                        alt: extract_attribute(tag, "alt")
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                }
+                tag_end + 1
+            }
+        };
+    }
+
+    blocks
+}
+
+fn next_block_start(xml: &str, from: usize) -> Option<(usize, BlockKind)> {
+    let mut candidates = Vec::new();
+    if let Some((pos, level)) = find_heading_start(xml, from) {
+        candidates.push((pos, BlockKind::Heading(level)));
+    }
+    for (tag_name, kind) in [
+        ("p", BlockKind::Paragraph),
+        ("ul", BlockKind::List(false)),
+        ("ol", BlockKind::List(true)),
+        ("table", BlockKind::Table),
+        ("img", BlockKind::Image),
+    ] {
+        if let Some(pos) = find_open_tag(xml, tag_name, from) {
+            candidates.push((pos, kind));
+        }
+    }
+    candidates.into_iter().min_by_key(|(pos, _)| *pos)
+}
+
+fn element_bounds(xml: &str, tag_start: usize, close_tag: &str) -> Option<(usize, usize, usize)> {
+    let tag_end = tag_start + xml[tag_start..].find('>')?;
+    let content_start = tag_end + 1;
+    let content_end = content_start + xml[content_start..].find(close_tag)?;
+    Some((content_start, content_end, content_end + close_tag.len()))
+}
+
+fn skip_open_tag(xml: &str, tag_start: usize) -> usize {
+    match xml[tag_start..].find('>') {
+        Some(rel) => tag_start + rel + 1,
+        None => xml.len(),
+    }
+}
+
 pub fn parse_headings(xhtml: &[u8]) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
@@ -460,6 +579,221 @@ fn extract_attribute<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod parse_blocks {
+        use super::*;
+
+        #[test]
+        fn when_mixed_blocks_then_returns_document_order() {
+            let xhtml = b"<h1>Title</h1><p>Intro.</p><h2>Sub</h2><p>Body.</p>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::Heading {
+                        level: 1,
+                        content: vec![Inline::Text("Title".to_string())],
+                    },
+                    Block::Paragraph {
+                        content: vec![Inline::Text("Intro.".to_string())],
+                    },
+                    Block::Heading {
+                        level: 2,
+                        content: vec![Inline::Text("Sub".to_string())],
+                    },
+                    Block::Paragraph {
+                        content: vec![Inline::Text("Body.".to_string())],
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_list_follows_paragraph_then_keeps_order() {
+            let xhtml = b"<p>Before</p><ul><li>A</li></ul><p>After</p>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::Paragraph {
+                        content: vec![Inline::Text("Before".to_string())],
+                    },
+                    Block::List {
+                        ordered: false,
+                        items: vec![ListItem {
+                            content: vec![Inline::Text("A".to_string())],
+                        }],
+                    },
+                    Block::Paragraph {
+                        content: vec![Inline::Text("After".to_string())],
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_paragraph_inside_list_item_then_not_emitted_separately() {
+            let xhtml = b"<ul><li><p>Nested</p></li></ul>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::List {
+                    ordered: false,
+                    items: vec![ListItem {
+                        content: vec![Inline::Text("Nested".to_string())],
+                    }],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_image_wrapped_in_paragraph_then_emits_image_block() {
+            let xhtml = br#"<p><img src="figure.png" alt="Figure"/></p>"#;
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Image {
+                    src: "figure.png".to_string(),
+                    alt: "Figure".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_paragraph_has_text_and_image_then_emits_both() {
+            let xhtml = br#"<p>Caption<img src="a.png" alt="A"/></p>"#;
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::Paragraph {
+                        content: vec![Inline::Text("Caption".to_string())],
+                    },
+                    Block::Image {
+                        src: "a.png".to_string(),
+                        alt: "A".to_string(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_empty_paragraph_then_skipped() {
+            let xhtml = b"<p></p><p>Real</p>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Paragraph {
+                    content: vec![Inline::Text("Real".to_string())],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_table_between_paragraphs_then_keeps_order() {
+            let xhtml = b"<p>Before</p><table><tr><th>H</th></tr></table><p>After</p>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::Paragraph {
+                        content: vec![Inline::Text("Before".to_string())],
+                    },
+                    Block::Table {
+                        headers: vec![vec![Inline::Text("H".to_string())]],
+                        rows: vec![],
+                    },
+                    Block::Paragraph {
+                        content: vec![Inline::Text("After".to_string())],
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_ordered_and_unordered_lists_then_distinguishes_them() {
+            let xhtml = b"<ol><li>A</li></ol><ul><li>B</li></ul>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![
+                    Block::List {
+                        ordered: true,
+                        items: vec![ListItem {
+                            content: vec![Inline::Text("A".to_string())],
+                        }],
+                    },
+                    Block::List {
+                        ordered: false,
+                        items: vec![ListItem {
+                            content: vec![Inline::Text("B".to_string())],
+                        }],
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn when_inline_markup_present_then_preserved_in_blocks() {
+            let xhtml = br#"<p>See <a href="x.xhtml">here</a></p>"#;
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Paragraph {
+                    content: vec![
+                        Inline::Text("See ".to_string()),
+                        Inline::Link {
+                            href: "x.xhtml".to_string(),
+                            content: vec![Inline::Text("here".to_string())],
+                        },
+                    ],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_unclosed_paragraph_then_does_not_loop_forever() {
+            let xhtml = b"<p>Unclosed<h1>Title</h1>";
+
+            let blocks = parse_blocks(xhtml);
+
+            assert_eq!(
+                blocks,
+                vec![Block::Heading {
+                    level: 1,
+                    content: vec![Inline::Text("Title".to_string())],
+                }]
+            );
+        }
+
+        #[test]
+        fn when_no_blocks_then_returns_empty() {
+            assert_eq!(parse_blocks(b"<html><body></body></html>"), vec![]);
+        }
+
+        #[test]
+        fn when_invalid_utf8_then_returns_empty() {
+            assert_eq!(parse_blocks(b"\xff\xfe<h1>Bad</h1>"), vec![]);
+        }
+    }
 
     mod parse_headings {
         use super::*;

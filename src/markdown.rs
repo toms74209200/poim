@@ -2,6 +2,21 @@ use crate::ir::{Block, Inline, ListItem};
 
 const MAX_HEADING_LEVEL: u8 = 6;
 
+pub fn emit(blocks: &[Block]) -> String {
+    blocks
+        .iter()
+        .map(|block| match block {
+            Block::Heading { level, content } => emit_heading(*level, content),
+            Block::Paragraph { content } => emit_paragraph(content),
+            Block::List { ordered, items } => emit_list(*ordered, items),
+            Block::Table { headers, rows } => emit_table(headers, rows),
+            Block::Image { src, alt } => emit_image(src, alt),
+        })
+        .filter(|rendered| !rendered.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 pub fn emit_heading(level: u8, content: &[Inline]) -> String {
     let level = level.clamp(1, MAX_HEADING_LEVEL);
     let hashes = "#".repeat(level as usize);
@@ -101,6 +116,77 @@ pub fn emit_inline(content: &[Inline]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod emit {
+        use super::*;
+
+        #[test]
+        fn when_multiple_blocks_then_joins_with_blank_lines() {
+            let blocks = vec![
+                Block::Heading {
+                    level: 1,
+                    content: vec![Inline::Text("Title".to_string())],
+                },
+                Block::Paragraph {
+                    content: vec![Inline::Text("Body.".to_string())],
+                },
+            ];
+
+            assert_eq!(emit(&blocks), "# Title\n\nBody.");
+        }
+
+        #[test]
+        fn when_every_block_kind_present_then_emits_each() {
+            let blocks = vec![
+                Block::Heading {
+                    level: 2,
+                    content: vec![Inline::Text("H".to_string())],
+                },
+                Block::Paragraph {
+                    content: vec![Inline::Text("P".to_string())],
+                },
+                Block::List {
+                    ordered: false,
+                    items: vec![ListItem {
+                        content: vec![Inline::Text("L".to_string())],
+                    }],
+                },
+                Block::Table {
+                    headers: vec![vec![Inline::Text("T".to_string())]],
+                    rows: vec![],
+                },
+                Block::Image {
+                    src: "a.png".to_string(),
+                    alt: "A".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                emit(&blocks),
+                "## H\n\nP\n\n- L\n\n| T |\n| --- |\n\n![A](a.png)"
+            );
+        }
+
+        #[test]
+        fn when_block_renders_empty_then_omitted() {
+            let blocks = vec![
+                Block::Table {
+                    headers: vec![],
+                    rows: vec![],
+                },
+                Block::Paragraph {
+                    content: vec![Inline::Text("Only".to_string())],
+                },
+            ];
+
+            assert_eq!(emit(&blocks), "Only");
+        }
+
+        #[test]
+        fn when_no_blocks_then_emits_empty_string() {
+            assert_eq!(emit(&[]), "");
+        }
+    }
 
     mod emit_heading {
         use super::*;

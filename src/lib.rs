@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod convert;
 pub mod epub;
 pub mod inflate;
 pub mod ir;
