@@ -3,7 +3,42 @@ use crate::markdown;
 use crate::xhtml;
 use crate::zip;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractedImage {
+    pub path: String,
+    pub data: Vec<u8>,
+}
+
 pub fn epub_to_markdown(data: &[u8]) -> Result<String, EpubError> {
+    let rendered: Vec<String> = read_spine_documents(data)?
+        .iter()
+        .map(|(_, content)| markdown::emit(&xhtml::parse_blocks(content)))
+        .filter(|rendered| !rendered.is_empty())
+        .collect();
+
+    Ok(rendered.join("\n\n"))
+}
+
+pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
+    let mut images: Vec<ExtractedImage> = Vec::new();
+
+    for (document_path, content) in read_spine_documents(data)? {
+        let base = parent_dir(&document_path);
+        for src in markdown::collect_image_sources(&xhtml::parse_blocks(&content)) {
+            let path = resolve_path(base, &src);
+            if images.iter().any(|image| image.path == path) {
+                continue;
+            }
+            if let Ok(bytes) = zip::extract_by_name(data, path.as_bytes()) {
+                images.push(ExtractedImage { path, data: bytes });
+            }
+        }
+    }
+
+    Ok(images)
+}
+
+fn read_spine_documents(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EpubError> {
     let opf_path = epub::find_opf_path_from_epub(data)?;
     let opf = zip::extract_by_name(data, opf_path.as_bytes()).map_err(EpubError::ZipError)?;
     let hrefs = epub::parse_spine(&opf)?;
@@ -13,13 +48,10 @@ pub fn epub_to_markdown(data: &[u8]) -> Result<String, EpubError> {
     for href in &hrefs {
         let path = resolve_path(base, href);
         let content = zip::extract_by_name(data, path.as_bytes()).map_err(EpubError::ZipError)?;
-        let rendered = markdown::emit(&xhtml::parse_blocks(&content));
-        if !rendered.is_empty() {
-            documents.push(rendered);
-        }
+        documents.push((path, content));
     }
 
-    Ok(documents.join("\n\n"))
+    Ok(documents)
 }
 
 fn parent_dir(path: &str) -> &str {
@@ -336,6 +368,160 @@ mod tests {
                 .build();
 
             assert_eq!(epub_to_markdown(&epub).unwrap(), "# Only");
+        }
+    }
+
+    mod extract_images {
+        use super::*;
+
+        const SINGLE_CHAPTER_OPF: &[u8] = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+
+        #[test]
+        fn when_chapter_references_image_then_extracts_it() {
+            let chapter = br#"<p><img src="figure.png" alt="Figure"/></p>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", SINGLE_CHAPTER_OPF)
+                .add("OEBPS/chapter1.xhtml", chapter)
+                .add("OEBPS/figure.png", b"PNGDATA")
+                .build();
+
+            let images = extract_images(&epub).unwrap();
+
+            assert_eq!(
+                images,
+                vec![ExtractedImage {
+                    path: "OEBPS/figure.png".to_string(),
+                    data: b"PNGDATA".to_vec(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_src_is_relative_to_chapter_then_resolves_from_chapter_dir() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="Text/chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let chapter = br#"<img src="../Images/figure.png" alt="Figure"/>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/Text/chapter1.xhtml", chapter)
+                .add("OEBPS/Images/figure.png", b"PNGDATA")
+                .build();
+
+            let images = extract_images(&epub).unwrap();
+
+            assert_eq!(
+                images,
+                vec![ExtractedImage {
+                    path: "OEBPS/Images/figure.png".to_string(),
+                    data: b"PNGDATA".to_vec(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_multiple_images_then_extracts_in_document_order() {
+            let chapter = br#"<img src="a.png" alt="A"/><p>text</p><img src="b.png" alt="B"/>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", SINGLE_CHAPTER_OPF)
+                .add("OEBPS/chapter1.xhtml", chapter)
+                .add("OEBPS/a.png", b"AAA")
+                .add("OEBPS/b.png", b"BBB")
+                .build();
+
+            let images = extract_images(&epub).unwrap();
+
+            assert_eq!(
+                images.iter().map(|i| i.path.as_str()).collect::<Vec<_>>(),
+                vec!["OEBPS/a.png", "OEBPS/b.png"]
+            );
+        }
+
+        #[test]
+        fn when_same_image_referenced_from_two_chapters_then_extracts_once() {
+            let opf = br#"<package>
+  <manifest>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>"#;
+            let chapter = br#"<img src="shared.png" alt="Shared"/>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/chapter1.xhtml", chapter)
+                .add("OEBPS/chapter2.xhtml", chapter)
+                .add("OEBPS/shared.png", b"SHARED")
+                .build();
+
+            let images = extract_images(&epub).unwrap();
+
+            assert_eq!(
+                images,
+                vec![ExtractedImage {
+                    path: "OEBPS/shared.png".to_string(),
+                    data: b"SHARED".to_vec(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_referenced_image_is_missing_then_skips_it() {
+            let chapter =
+                br#"<img src="missing.png" alt="Gone"/><img src="present.png" alt="Here"/>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", SINGLE_CHAPTER_OPF)
+                .add("OEBPS/chapter1.xhtml", chapter)
+                .add("OEBPS/present.png", b"HERE")
+                .build();
+
+            let images = extract_images(&epub).unwrap();
+
+            assert_eq!(
+                images,
+                vec![ExtractedImage {
+                    path: "OEBPS/present.png".to_string(),
+                    data: b"HERE".to_vec(),
+                }]
+            );
+        }
+
+        #[test]
+        fn when_no_images_referenced_then_returns_empty() {
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", SINGLE_CHAPTER_OPF)
+                .add("OEBPS/chapter1.xhtml", b"<h1>No images</h1>")
+                .add("OEBPS/unused.png", b"UNUSED")
+                .build();
+
+            assert_eq!(extract_images(&epub).unwrap(), vec![]);
+        }
+
+        #[test]
+        fn when_spine_file_is_missing_then_returns_zip_error() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="missing.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .build();
+
+            assert_eq!(
+                extract_images(&epub),
+                Err(EpubError::ZipError(crate::zip::ZipError::EntryNotFound))
+            );
         }
     }
 }
