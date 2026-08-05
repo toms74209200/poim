@@ -113,7 +113,10 @@ mod tests {
             unsafe { deallocate(first, size) };
             let second = allocate(size);
 
-            assert_eq!(first, second, "freed block was not returned to the allocator");
+            assert_eq!(
+                first, second,
+                "freed block was not returned to the allocator"
+            );
 
             unsafe { deallocate(second, size) };
         }
