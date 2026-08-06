@@ -1,14 +1,16 @@
-use crate::ir::{Block, Inline, ListItem};
+use crate::ir::{
+    Block, Cell, HeadingLevel, Inline, ListItem, ListKind, NonEmpty, ResourcePath, Table,
+};
 
 enum BlockKind {
     Heading(u8),
     Paragraph,
-    List(bool),
+    List(ListKind),
     Table,
     Image,
 }
 
-pub fn parse_blocks(xhtml: &[u8]) -> Vec<Block> {
+pub fn parse_blocks(xhtml: &[u8], base: &str) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -21,10 +23,11 @@ pub fn parse_blocks(xhtml: &[u8]) -> Vec<Block> {
             BlockKind::Heading(level) => {
                 match element_bounds(xml, tag_start, &format!("</h{level}>")) {
                     Some((content_start, content_end, next)) => {
-                        blocks.push(Block::Heading {
-                            level,
-                            content: parse_inline(&xml[content_start..content_end]),
-                        });
+                        if let Some(block) =
+                            build_heading(level, parse_inline(&xml[content_start..content_end]))
+                        {
+                            blocks.push(block);
+                        }
                         next
                     }
                     None => skip_open_tag(xml, tag_start),
@@ -33,22 +36,24 @@ pub fn parse_blocks(xhtml: &[u8]) -> Vec<Block> {
             BlockKind::Paragraph => match element_bounds(xml, tag_start, "</p>") {
                 Some((content_start, content_end, next)) => {
                     let inner = &xml[content_start..content_end];
-                    let content = parse_inline(inner);
-                    if !content.is_empty() {
+                    if let Some(content) = NonEmpty::new(parse_inline(inner)) {
                         blocks.push(Block::Paragraph { content });
                     }
-                    blocks.extend(parse_images(inner.as_bytes()));
+                    blocks.extend(parse_images(inner.as_bytes(), base));
                     next
                 }
                 None => skip_open_tag(xml, tag_start),
             },
-            BlockKind::List(ordered) => {
-                let close_tag = if ordered { "</ol>" } else { "</ul>" };
+            BlockKind::List(kind) => {
+                let close_tag = match kind {
+                    ListKind::Ordered => "</ol>",
+                    ListKind::Unordered => "</ul>",
+                };
                 match element_bounds(xml, tag_start, close_tag) {
                     Some((content_start, content_end, next)) => {
                         let items = parse_list_items(&xml[content_start..content_end]);
-                        if !items.is_empty() {
-                            blocks.push(Block::List { ordered, items });
+                        if let Some(items) = NonEmpty::new(items) {
+                            blocks.push(Block::List { kind, items });
                         }
                         next
                     }
@@ -72,7 +77,7 @@ pub fn parse_blocks(xhtml: &[u8]) -> Vec<Block> {
                 let tag = &xml[tag_start..=tag_end];
                 if let Some(src) = extract_attribute(tag, "src") {
                     blocks.push(Block::Image {
-                        src: src.to_string(),
+                        src: ResourcePath::resolve(base, src),
                         alt: extract_attribute(tag, "alt")
                             .unwrap_or_default()
                             .to_string(),
@@ -93,8 +98,8 @@ fn next_block_start(xml: &str, from: usize) -> Option<(usize, BlockKind)> {
     }
     for (tag_name, kind) in [
         ("p", BlockKind::Paragraph),
-        ("ul", BlockKind::List(false)),
-        ("ol", BlockKind::List(true)),
+        ("ul", BlockKind::List(ListKind::Unordered)),
+        ("ol", BlockKind::List(ListKind::Ordered)),
         ("table", BlockKind::Table),
         ("img", BlockKind::Image),
     ] {
@@ -143,8 +148,9 @@ pub fn parse_headings(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        let content = parse_inline(&xml[content_start..content_end]);
-        blocks.push(Block::Heading { level, content });
+        if let Some(block) = build_heading(level, parse_inline(&xml[content_start..content_end])) {
+            blocks.push(block);
+        }
 
         search_from = content_end + close_tag.len();
     }
@@ -175,8 +181,9 @@ pub fn parse_paragraphs(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        let content = parse_inline(&xml[content_start..content_end]);
-        blocks.push(Block::Paragraph { content });
+        if let Some(content) = NonEmpty::new(parse_inline(&xml[content_start..content_end])) {
+            blocks.push(Block::Paragraph { content });
+        }
 
         search_from = content_end + "</p>".len();
     }
@@ -193,14 +200,14 @@ pub fn parse_lists(xhtml: &[u8]) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut search_from = 0;
     loop {
-        let (tag_start, ordered, tag_name) = match (
+        let (tag_start, kind, tag_name) = match (
             find_open_tag(xml, "ul", search_from),
             find_open_tag(xml, "ol", search_from),
         ) {
-            (Some(u), Some(o)) if u < o => (u, false, "ul"),
-            (Some(_), Some(o)) => (o, true, "ol"),
-            (Some(u), None) => (u, false, "ul"),
-            (None, Some(o)) => (o, true, "ol"),
+            (Some(u), Some(o)) if u < o => (u, ListKind::Unordered, "ul"),
+            (Some(_), Some(o)) => (o, ListKind::Ordered, "ol"),
+            (Some(u), None) => (u, ListKind::Unordered, "ul"),
+            (None, Some(o)) => (o, ListKind::Ordered, "ol"),
             (None, None) => break,
         };
 
@@ -220,8 +227,8 @@ pub fn parse_lists(xhtml: &[u8]) -> Vec<Block> {
         };
 
         let items = parse_list_items(&xml[content_start..content_end]);
-        if !items.is_empty() {
-            blocks.push(Block::List { ordered, items });
+        if let Some(items) = NonEmpty::new(items) {
+            blocks.push(Block::List { kind, items });
         }
 
         search_from = content_end + close_tag.len();
@@ -248,8 +255,9 @@ fn parse_list_items(xml: &str) -> Vec<ListItem> {
             }
         };
 
-        let content = parse_inline(&xml[content_start..content_end]);
-        items.push(ListItem { content });
+        if let Some(item) = ListItem::new(parse_inline(&xml[content_start..content_end])) {
+            items.push(item);
+        }
 
         search_from = content_end + "</li>".len();
     }
@@ -291,8 +299,8 @@ pub fn parse_tables(xhtml: &[u8]) -> Vec<Block> {
 }
 
 fn parse_table_content(xml: &str) -> Option<Block> {
-    let mut headers: Vec<Vec<Inline>> = Vec::new();
-    let mut rows: Vec<Vec<Vec<Inline>>> = Vec::new();
+    let mut headers: Option<Vec<Cell>> = None;
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
 
     let mut search_from = 0;
     while let Some(tag_start) = find_open_tag(xml, "tr", search_from) {
@@ -311,8 +319,8 @@ fn parse_table_content(xml: &str) -> Option<Block> {
         };
 
         let (cells, has_header_cell) = parse_row_cells(&xml[content_start..content_end]);
-        if has_header_cell && headers.is_empty() && rows.is_empty() {
-            headers = cells;
+        if has_header_cell && headers.is_none() && rows.is_empty() {
+            headers = Some(cells);
         } else if !cells.is_empty() {
             rows.push(cells);
         }
@@ -320,14 +328,10 @@ fn parse_table_content(xml: &str) -> Option<Block> {
         search_from = content_end + "</tr>".len();
     }
 
-    if headers.is_empty() && rows.is_empty() {
-        return None;
-    }
-
-    Some(Block::Table { headers, rows })
+    Table::new(headers, rows).map(Block::Table)
 }
 
-fn parse_row_cells(xml: &str) -> (Vec<Vec<Inline>>, bool) {
+fn parse_row_cells(xml: &str) -> (Vec<Cell>, bool) {
     let mut cells = Vec::new();
     let mut has_header_cell = false;
 
@@ -362,7 +366,7 @@ fn parse_row_cells(xml: &str) -> (Vec<Vec<Inline>>, bool) {
         if tag_name == "th" {
             has_header_cell = true;
         }
-        cells.push(parse_inline(&xml[content_start..content_end]));
+        cells.push(Cell::new(parse_inline(&xml[content_start..content_end])));
 
         search_from = content_end + close_tag.len();
     }
@@ -370,7 +374,7 @@ fn parse_row_cells(xml: &str) -> (Vec<Vec<Inline>>, bool) {
     (cells, has_header_cell)
 }
 
-pub fn parse_images(xhtml: &[u8]) -> Vec<Block> {
+pub fn parse_images(xhtml: &[u8], base: &str) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -387,7 +391,7 @@ pub fn parse_images(xhtml: &[u8]) -> Vec<Block> {
 
         if let Some(src) = extract_attribute(tag, "src") {
             blocks.push(Block::Image {
-                src: src.to_string(),
+                src: ResourcePath::resolve(base, src),
                 alt: extract_attribute(tag, "alt")
                     .unwrap_or_default()
                     .to_string(),
@@ -474,15 +478,18 @@ pub fn parse_inline(xml: &str) -> Vec<Inline> {
                                 }
                                 let content_end = content_start + close_rel;
                                 let inner = parse_inline(&xml[content_start..content_end]);
-                                inlines.push(match tag {
-                                    "em" => Inline::Emphasis(inner),
-                                    "strong" => Inline::Strong(inner),
-                                    "a" => Inline::Link {
+                                let built = match tag {
+                                    "em" => NonEmpty::new(inner).map(Inline::Emphasis),
+                                    "strong" => NonEmpty::new(inner).map(Inline::Strong),
+                                    "a" => Some(Inline::Link {
                                         href: href.unwrap_or_default(),
                                         content: inner,
-                                    },
+                                    }),
                                     _ => unreachable!(),
-                                });
+                                };
+                                if let Some(inline) = built {
+                                    inlines.push(inline);
+                                }
                                 pos = content_end + close_tag.len();
                             }
                             None => pos = content_start,
@@ -576,9 +583,30 @@ fn extract_attribute<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
     }
 }
 
+fn build_heading(level: u8, content: Vec<Inline>) -> Option<Block> {
+    Some(Block::Heading {
+        level: HeadingLevel::new(level)?,
+        content: NonEmpty::new(content)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table(headers: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>) -> Table {
+        Table::new(
+            if headers.is_empty() {
+                None
+            } else {
+                Some(headers.into_iter().map(Cell::new).collect())
+            },
+            rows.into_iter()
+                .map(|row| row.into_iter().map(Cell::new).collect())
+                .collect(),
+        )
+        .unwrap()
+    }
 
     mod parse_blocks {
         use super::*;
@@ -587,24 +615,24 @@ mod tests {
         fn when_mixed_blocks_then_returns_document_order() {
             let xhtml = b"<h1>Title</h1><p>Intro.</p><h2>Sub</h2><p>Body.</p>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![
                     Block::Heading {
-                        level: 1,
-                        content: vec![Inline::Text("Title".to_string())],
+                        level: HeadingLevel::new(1).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
                     },
                     Block::Paragraph {
-                        content: vec![Inline::Text("Intro.".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("Intro.".to_string())]).unwrap(),
                     },
                     Block::Heading {
-                        level: 2,
-                        content: vec![Inline::Text("Sub".to_string())],
+                        level: HeadingLevel::new(2).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("Sub".to_string())]).unwrap(),
                     },
                     Block::Paragraph {
-                        content: vec![Inline::Text("Body.".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("Body.".to_string())]).unwrap(),
                     },
                 ]
             );
@@ -614,22 +642,23 @@ mod tests {
         fn when_list_follows_paragraph_then_keeps_order() {
             let xhtml = b"<p>Before</p><ul><li>A</li></ul><p>After</p>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: vec![Inline::Text("Before".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("Before".to_string())]).unwrap(),
                     },
                     Block::List {
-                        ordered: false,
-                        items: vec![ListItem {
-                            content: vec![Inline::Text("A".to_string())],
-                        }],
+                        kind: ListKind::Unordered,
+                        items: NonEmpty::new(vec![
+                            ListItem::new(vec![Inline::Text("A".to_string())]).unwrap()
+                        ])
+                        .unwrap(),
                     },
                     Block::Paragraph {
-                        content: vec![Inline::Text("After".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("After".to_string())]).unwrap(),
                     },
                 ]
             );
@@ -639,15 +668,16 @@ mod tests {
         fn when_paragraph_inside_list_item_then_not_emitted_separately() {
             let xhtml = b"<ul><li><p>Nested</p></li></ul>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::List {
-                    ordered: false,
-                    items: vec![ListItem {
-                        content: vec![Inline::Text("Nested".to_string())],
-                    }],
+                    kind: ListKind::Unordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![Inline::Text("Nested".to_string())]).unwrap()
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -656,12 +686,12 @@ mod tests {
         fn when_image_wrapped_in_paragraph_then_emits_image_block() {
             let xhtml = br#"<p><img src="figure.png" alt="Figure"/></p>"#;
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "figure.png".to_string(),
+                    src: ResourcePath::resolve("", "figure.png"),
                     alt: "Figure".to_string(),
                 }]
             );
@@ -671,16 +701,16 @@ mod tests {
         fn when_paragraph_has_text_and_image_then_emits_both() {
             let xhtml = br#"<p>Caption<img src="a.png" alt="A"/></p>"#;
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: vec![Inline::Text("Caption".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("Caption".to_string())]).unwrap(),
                     },
                     Block::Image {
-                        src: "a.png".to_string(),
+                        src: ResourcePath::resolve("", "a.png"),
                         alt: "A".to_string(),
                     },
                 ]
@@ -691,12 +721,12 @@ mod tests {
         fn when_empty_paragraph_then_skipped() {
             let xhtml = b"<p></p><p>Real</p>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: vec![Inline::Text("Real".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("Real".to_string())]).unwrap(),
                 }]
             );
         }
@@ -705,20 +735,17 @@ mod tests {
         fn when_table_between_paragraphs_then_keeps_order() {
             let xhtml = b"<p>Before</p><table><tr><th>H</th></tr></table><p>After</p>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: vec![Inline::Text("Before".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("Before".to_string())]).unwrap(),
                     },
-                    Block::Table {
-                        headers: vec![vec![Inline::Text("H".to_string())]],
-                        rows: vec![],
-                    },
+                    Block::Table(table(vec![vec![Inline::Text("H".to_string())]], vec![])),
                     Block::Paragraph {
-                        content: vec![Inline::Text("After".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("After".to_string())]).unwrap(),
                     },
                 ]
             );
@@ -728,22 +755,24 @@ mod tests {
         fn when_ordered_and_unordered_lists_then_distinguishes_them() {
             let xhtml = b"<ol><li>A</li></ol><ul><li>B</li></ul>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![
                     Block::List {
-                        ordered: true,
-                        items: vec![ListItem {
-                            content: vec![Inline::Text("A".to_string())],
-                        }],
+                        kind: ListKind::Ordered,
+                        items: NonEmpty::new(vec![
+                            ListItem::new(vec![Inline::Text("A".to_string())]).unwrap()
+                        ])
+                        .unwrap(),
                     },
                     Block::List {
-                        ordered: false,
-                        items: vec![ListItem {
-                            content: vec![Inline::Text("B".to_string())],
-                        }],
+                        kind: ListKind::Unordered,
+                        items: NonEmpty::new(vec![
+                            ListItem::new(vec![Inline::Text("B".to_string())]).unwrap()
+                        ])
+                        .unwrap(),
                     },
                 ]
             );
@@ -753,18 +782,19 @@ mod tests {
         fn when_inline_markup_present_then_preserved_in_blocks() {
             let xhtml = br#"<p>See <a href="x.xhtml">here</a></p>"#;
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: vec![
+                    content: NonEmpty::new(vec![
                         Inline::Text("See ".to_string()),
                         Inline::Link {
                             href: "x.xhtml".to_string(),
                             content: vec![Inline::Text("here".to_string())],
                         },
-                    ],
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -773,25 +803,25 @@ mod tests {
         fn when_unclosed_paragraph_then_does_not_loop_forever() {
             let xhtml = b"<p>Unclosed<h1>Title</h1>";
 
-            let blocks = parse_blocks(xhtml);
+            let blocks = parse_blocks(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Heading {
-                    level: 1,
-                    content: vec![Inline::Text("Title".to_string())],
+                    level: HeadingLevel::new(1).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
                 }]
             );
         }
 
         #[test]
         fn when_no_blocks_then_returns_empty() {
-            assert_eq!(parse_blocks(b"<html><body></body></html>"), vec![]);
+            assert_eq!(parse_blocks(b"<html><body></body></html>", ""), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
-            assert_eq!(parse_blocks(b"\xff\xfe<h1>Bad</h1>"), vec![]);
+            assert_eq!(parse_blocks(b"\xff\xfe<h1>Bad</h1>", ""), vec![]);
         }
     }
 
@@ -807,8 +837,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Heading {
-                    level: 1,
-                    content: vec![Inline::Text("Chapter One".to_string())],
+                    level: HeadingLevel::new(1).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Chapter One".to_string())]).unwrap(),
                 }]
             );
         }
@@ -823,12 +853,12 @@ mod tests {
                 blocks,
                 vec![
                     Block::Heading {
-                        level: 1,
-                        content: vec![Inline::Text("Title".to_string())],
+                        level: HeadingLevel::new(1).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
                     },
                     Block::Heading {
-                        level: 2,
-                        content: vec![Inline::Text("Subtitle".to_string())],
+                        level: HeadingLevel::new(2).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("Subtitle".to_string())]).unwrap(),
                     },
                 ]
             );
@@ -843,8 +873,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Heading {
-                    level: 2,
-                    content: vec![Inline::Text("Section".to_string())],
+                    level: HeadingLevel::new(2).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Section".to_string())]).unwrap(),
                 }]
             );
         }
@@ -858,8 +888,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Heading {
-                    level: 1,
-                    content: vec![Inline::Text("Hello World".to_string())],
+                    level: HeadingLevel::new(1).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Hello World".to_string())]).unwrap(),
                 }]
             );
         }
@@ -873,11 +903,14 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Heading {
-                    level: 1,
-                    content: vec![
+                    level: HeadingLevel::new(1).unwrap(),
+                    content: NonEmpty::new(vec![
                         Inline::Text("Hello ".to_string()),
-                        Inline::Emphasis(vec![Inline::Text("World".to_string())]),
-                    ],
+                        Inline::Emphasis(
+                            NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                        ),
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -891,8 +924,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Heading {
-                    level: 3,
-                    content: vec![Inline::Text("Padded".to_string())],
+                    level: HeadingLevel::new(3).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Padded".to_string())]).unwrap(),
                 }]
             );
         }
@@ -928,28 +961,28 @@ mod tests {
                 blocks,
                 vec![
                     Block::Heading {
-                        level: 1,
-                        content: vec![Inline::Text("A".to_string())]
+                        level: HeadingLevel::new(1).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("A".to_string())]).unwrap()
                     },
                     Block::Heading {
-                        level: 2,
-                        content: vec![Inline::Text("B".to_string())]
+                        level: HeadingLevel::new(2).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("B".to_string())]).unwrap()
                     },
                     Block::Heading {
-                        level: 3,
-                        content: vec![Inline::Text("C".to_string())]
+                        level: HeadingLevel::new(3).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("C".to_string())]).unwrap()
                     },
                     Block::Heading {
-                        level: 4,
-                        content: vec![Inline::Text("D".to_string())]
+                        level: HeadingLevel::new(4).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("D".to_string())]).unwrap()
                     },
                     Block::Heading {
-                        level: 5,
-                        content: vec![Inline::Text("E".to_string())]
+                        level: HeadingLevel::new(5).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("E".to_string())]).unwrap()
                     },
                     Block::Heading {
-                        level: 6,
-                        content: vec![Inline::Text("F".to_string())]
+                        level: HeadingLevel::new(6).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text("F".to_string())]).unwrap()
                     },
                 ]
             );
@@ -968,7 +1001,7 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: vec![Inline::Text("Hello world.".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("Hello world.".to_string())]).unwrap(),
                 }]
             );
         }
@@ -983,10 +1016,10 @@ mod tests {
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: vec![Inline::Text("First.".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("First.".to_string())]).unwrap(),
                     },
                     Block::Paragraph {
-                        content: vec![Inline::Text("Second.".to_string())],
+                        content: NonEmpty::new(vec![Inline::Text("Second.".to_string())]).unwrap(),
                     },
                 ]
             );
@@ -1001,7 +1034,7 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: vec![Inline::Text("Welcome.".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("Welcome.".to_string())]).unwrap(),
                 }]
             );
         }
@@ -1015,7 +1048,7 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: vec![Inline::Text("Hello World.".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("Hello World.".to_string())]).unwrap(),
                 }]
             );
         }
@@ -1029,16 +1062,19 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: vec![
+                    content: NonEmpty::new(vec![
                         Inline::Text("Visit ".to_string()),
                         Inline::Link {
                             href: "https://example.com".to_string(),
                             content: vec![Inline::Text("here".to_string())],
                         },
                         Inline::Text(" for ".to_string()),
-                        Inline::Strong(vec![Inline::Text("details".to_string())]),
+                        Inline::Strong(
+                            NonEmpty::new(vec![Inline::Text("details".to_string())]).unwrap()
+                        ),
                         Inline::Text(".".to_string()),
-                    ],
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -1070,15 +1106,12 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::List {
-                    ordered: false,
-                    items: vec![
-                        ListItem {
-                            content: vec![Inline::Text("First".to_string())],
-                        },
-                        ListItem {
-                            content: vec![Inline::Text("Second".to_string())],
-                        },
-                    ],
+                    kind: ListKind::Unordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![Inline::Text("First".to_string())]).unwrap(),
+                        ListItem::new(vec![Inline::Text("Second".to_string())]).unwrap(),
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -1092,15 +1125,12 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::List {
-                    ordered: true,
-                    items: vec![
-                        ListItem {
-                            content: vec![Inline::Text("First".to_string())],
-                        },
-                        ListItem {
-                            content: vec![Inline::Text("Second".to_string())],
-                        },
-                    ],
+                    kind: ListKind::Ordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![Inline::Text("First".to_string())]).unwrap(),
+                        ListItem::new(vec![Inline::Text("Second".to_string())]).unwrap(),
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -1115,16 +1145,18 @@ mod tests {
                 blocks,
                 vec![
                     Block::List {
-                        ordered: false,
-                        items: vec![ListItem {
-                            content: vec![Inline::Text("A".to_string())],
-                        }],
+                        kind: ListKind::Unordered,
+                        items: NonEmpty::new(vec![
+                            ListItem::new(vec![Inline::Text("A".to_string())]).unwrap()
+                        ])
+                        .unwrap(),
                     },
                     Block::List {
-                        ordered: true,
-                        items: vec![ListItem {
-                            content: vec![Inline::Text("B".to_string())],
-                        }],
+                        kind: ListKind::Ordered,
+                        items: NonEmpty::new(vec![
+                            ListItem::new(vec![Inline::Text("B".to_string())]).unwrap()
+                        ])
+                        .unwrap(),
                     },
                 ]
             );
@@ -1139,10 +1171,11 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::List {
-                    ordered: false,
-                    items: vec![ListItem {
-                        content: vec![Inline::Text("Hello World".to_string())],
-                    }],
+                    kind: ListKind::Unordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![Inline::Text("Hello World".to_string())]).unwrap()
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -1156,16 +1189,18 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::List {
-                    ordered: false,
-                    items: vec![ListItem {
-                        content: vec![
+                    kind: ListKind::Unordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![
                             Inline::Text("See ".to_string()),
                             Inline::Link {
                                 href: "chapter2.xhtml".to_string(),
                                 content: vec![Inline::Text("Chapter 2".to_string())],
                             },
-                        ],
-                    }],
+                        ])
+                        .unwrap()
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -1179,10 +1214,11 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::List {
-                    ordered: false,
-                    items: vec![ListItem {
-                        content: vec![Inline::Text("Entry".to_string())],
-                    }],
+                    kind: ListKind::Unordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![Inline::Text("Entry".to_string())]).unwrap()
+                    ])
+                    .unwrap(),
                 }]
             );
         }
@@ -1224,12 +1260,12 @@ mod tests {
 
             assert_eq!(
                 blocks,
-                vec![Block::Table {
-                    headers: vec![
+                vec![Block::Table(table(
+                    vec![
                         vec![Inline::Text("Name".to_string())],
                         vec![Inline::Text("Age".to_string())],
                     ],
-                    rows: vec![
+                    vec![
                         vec![
                             vec![Inline::Text("Alice".to_string())],
                             vec![Inline::Text("30".to_string())],
@@ -1238,8 +1274,8 @@ mod tests {
                             vec![Inline::Text("Bob".to_string())],
                             vec![Inline::Text("25".to_string())],
                         ],
-                    ],
-                }]
+                    ]
+                ))]
             );
         }
 
@@ -1254,10 +1290,10 @@ mod tests {
 
             assert_eq!(
                 blocks,
-                vec![Block::Table {
-                    headers: vec![vec![Inline::Text("Key".to_string())]],
-                    rows: vec![vec![vec![Inline::Text("Value".to_string())]]],
-                }]
+                vec![Block::Table(table(
+                    vec![vec![Inline::Text("Key".to_string())]],
+                    vec![vec![vec![Inline::Text("Value".to_string())]]]
+                ))]
             );
         }
 
@@ -1269,13 +1305,13 @@ mod tests {
 
             assert_eq!(
                 blocks,
-                vec![Block::Table {
-                    headers: vec![],
-                    rows: vec![vec![
+                vec![Block::Table(table(
+                    vec![],
+                    vec![vec![
                         vec![Inline::Text("A".to_string())],
                         vec![Inline::Text("B".to_string())],
-                    ]],
-                }]
+                    ]]
+                ))]
             );
         }
 
@@ -1287,16 +1323,16 @@ mod tests {
 
             assert_eq!(
                 blocks,
-                vec![Block::Table {
-                    headers: vec![],
-                    rows: vec![vec![vec![
+                vec![Block::Table(table(
+                    vec![],
+                    vec![vec![vec![
                         Inline::Text("See ".to_string()),
                         Inline::Link {
                             href: "x.xhtml".to_string(),
                             content: vec![Inline::Text("link".to_string())],
                         },
-                    ]]],
-                }]
+                    ]]]
+                ))]
             );
         }
 
@@ -1308,10 +1344,10 @@ mod tests {
 
             assert_eq!(
                 blocks,
-                vec![Block::Table {
-                    headers: vec![],
-                    rows: vec![vec![vec![Inline::Text("Cell".to_string())]]],
-                }]
+                vec![Block::Table(table(
+                    vec![],
+                    vec![vec![vec![Inline::Text("Cell".to_string())]]]
+                ))]
             );
         }
 
@@ -1325,14 +1361,14 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![
-                    Block::Table {
-                        headers: vec![],
-                        rows: vec![vec![vec![Inline::Text("A".to_string())]]],
-                    },
-                    Block::Table {
-                        headers: vec![],
-                        rows: vec![vec![vec![Inline::Text("B".to_string())]]],
-                    },
+                    Block::Table(table(
+                        vec![],
+                        vec![vec![vec![Inline::Text("A".to_string())]]]
+                    )),
+                    Block::Table(table(
+                        vec![],
+                        vec![vec![vec![Inline::Text("B".to_string())]]]
+                    )),
                 ]
             );
         }
@@ -1345,13 +1381,13 @@ mod tests {
 
             assert_eq!(
                 blocks,
-                vec![Block::Table {
-                    headers: vec![],
-                    rows: vec![
+                vec![Block::Table(table(
+                    vec![],
+                    vec![
                         vec![vec![Inline::Text("A".to_string())]],
                         vec![vec![Inline::Text("H".to_string())]],
-                    ],
-                }]
+                    ]
+                ))]
             );
         }
 
@@ -1384,12 +1420,12 @@ mod tests {
         fn when_self_closing_img_then_returns_image_block() {
             let xhtml = br#"<img src="cover.jpg" alt="Cover"/>"#;
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "cover.jpg".to_string(),
+                    src: ResourcePath::resolve("", "cover.jpg"),
                     alt: "Cover".to_string(),
                 }]
             );
@@ -1399,12 +1435,12 @@ mod tests {
         fn when_img_without_alt_then_returns_empty_alt() {
             let xhtml = br#"<img src="figure1.png"/>"#;
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "figure1.png".to_string(),
+                    src: ResourcePath::resolve("", "figure1.png"),
                     alt: String::new(),
                 }]
             );
@@ -1414,19 +1450,19 @@ mod tests {
         fn when_img_without_src_then_skipped() {
             let xhtml = br#"<img alt="orphan"/>"#;
 
-            assert_eq!(parse_images(xhtml), vec![]);
+            assert_eq!(parse_images(xhtml, ""), vec![]);
         }
 
         #[test]
         fn when_attributes_in_reversed_order_then_still_parsed() {
             let xhtml = br#"<img alt="Cover" src="cover.jpg"/>"#;
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "cover.jpg".to_string(),
+                    src: ResourcePath::resolve("", "cover.jpg"),
                     alt: "Cover".to_string(),
                 }]
             );
@@ -1436,12 +1472,12 @@ mod tests {
         fn when_nested_path_then_returns_full_path() {
             let xhtml = br#"<img src="Images/ch1/figure1.png" alt="Figure 1"/>"#;
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "Images/ch1/figure1.png".to_string(),
+                    src: ResourcePath::resolve("", "Images/ch1/figure1.png"),
                     alt: "Figure 1".to_string(),
                 }]
             );
@@ -1452,17 +1488,17 @@ mod tests {
             let xhtml =
                 br#"<p>text</p><img src="a.png" alt="A"/><p>gap</p><img src="b.png" alt="B"/>"#;
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![
                     Block::Image {
-                        src: "a.png".to_string(),
+                        src: ResourcePath::resolve("", "a.png"),
                         alt: "A".to_string(),
                     },
                     Block::Image {
-                        src: "b.png".to_string(),
+                        src: ResourcePath::resolve("", "b.png"),
                         alt: "B".to_string(),
                     },
                 ]
@@ -1473,12 +1509,12 @@ mod tests {
         fn when_single_quoted_attributes_then_returns_values() {
             let xhtml = b"<img src='cover.jpg' alt='Cover'/>";
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "cover.jpg".to_string(),
+                    src: ResourcePath::resolve("", "cover.jpg"),
                     alt: "Cover".to_string(),
                 }]
             );
@@ -1488,12 +1524,12 @@ mod tests {
         fn when_similarly_named_attribute_then_not_mistaken_for_src() {
             let xhtml = br#"<img data-src="wrong.png" src="right.png"/>"#;
 
-            let blocks = parse_images(xhtml);
+            let blocks = parse_images(xhtml, "");
 
             assert_eq!(
                 blocks,
                 vec![Block::Image {
-                    src: "right.png".to_string(),
+                    src: ResourcePath::resolve("", "right.png"),
                     alt: String::new(),
                 }]
             );
@@ -1503,14 +1539,14 @@ mod tests {
         fn when_no_images_then_returns_empty() {
             let xhtml = b"<p>No images here</p>";
 
-            assert_eq!(parse_images(xhtml), vec![]);
+            assert_eq!(parse_images(xhtml, ""), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
             let xhtml = b"\xff\xfe<img src=\"bad.png\"/>";
 
-            assert_eq!(parse_images(xhtml), vec![]);
+            assert_eq!(parse_images(xhtml, ""), vec![]);
         }
     }
 
@@ -1556,7 +1592,9 @@ mod tests {
 
             assert_eq!(
                 inlines,
-                vec![Inline::Emphasis(vec![Inline::Text("World".to_string())])]
+                vec![Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                )]
             );
         }
 
@@ -1566,7 +1604,9 @@ mod tests {
 
             assert_eq!(
                 inlines,
-                vec![Inline::Strong(vec![Inline::Text("World".to_string())])]
+                vec![Inline::Strong(
+                    NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                )]
             );
         }
 
@@ -1576,10 +1616,15 @@ mod tests {
 
             assert_eq!(
                 inlines,
-                vec![Inline::Emphasis(vec![
-                    Inline::Text("very ".to_string()),
-                    Inline::Strong(vec![Inline::Text("important".to_string())]),
-                ])]
+                vec![Inline::Emphasis(
+                    NonEmpty::new(vec![
+                        Inline::Text("very ".to_string()),
+                        Inline::Strong(
+                            NonEmpty::new(vec![Inline::Text("important".to_string())]).unwrap()
+                        ),
+                    ])
+                    .unwrap()
+                )]
             );
         }
 
@@ -1591,7 +1636,9 @@ mod tests {
                 inlines,
                 vec![Inline::Link {
                     href: "x.xhtml".to_string(),
-                    content: vec![Inline::Emphasis(vec![Inline::Text("Chapter".to_string())])],
+                    content: vec![Inline::Emphasis(
+                        NonEmpty::new(vec![Inline::Text("Chapter".to_string())]).unwrap()
+                    )],
                 }]
             );
         }
@@ -1611,9 +1658,9 @@ mod tests {
                 inlines,
                 vec![
                     Inline::Text("A ".to_string()),
-                    Inline::Emphasis(vec![Inline::Text("B".to_string())]),
+                    Inline::Emphasis(NonEmpty::new(vec![Inline::Text("B".to_string())]).unwrap()),
                     Inline::Text(" C ".to_string()),
-                    Inline::Strong(vec![Inline::Text("D".to_string())]),
+                    Inline::Strong(NonEmpty::new(vec![Inline::Text("D".to_string())]).unwrap()),
                     Inline::Text(" E".to_string()),
                 ]
             );
@@ -1639,7 +1686,9 @@ mod tests {
                 inlines,
                 vec![
                     Inline::Text("Hello ".to_string()),
-                    Inline::Emphasis(vec![Inline::Text("World".to_string())]),
+                    Inline::Emphasis(
+                        NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                    ),
                 ]
             );
         }
@@ -1650,7 +1699,9 @@ mod tests {
 
             assert_eq!(
                 inlines,
-                vec![Inline::Emphasis(vec![Inline::Text("World".to_string())])]
+                vec![Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                )]
             );
         }
     }
