@@ -73,6 +73,47 @@ impl ResourcePath {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor(String);
+
+impl Anchor {
+    pub fn new(document: &ResourcePath, fragment: Option<&str>) -> Self {
+        let mut value = sanitize_anchor(document.as_str());
+        if let Some(fragment) = fragment {
+            value.push_str("--");
+            value.push_str(&sanitize_anchor(fragment));
+        }
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn sanitize_anchor(value: &str) -> String {
+    let mut result = String::new();
+    let mut separated = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            if separated && !result.is_empty() {
+                result.push('-');
+            }
+            separated = false;
+            result.push(character);
+        } else {
+            separated = true;
+        }
+    }
+    result
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    External(String),
+    Internal(Anchor),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell(Vec<Inline>);
 
@@ -169,6 +210,7 @@ pub enum Block {
         src: ResourcePath,
         alt: String,
     },
+    Anchor(Anchor),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,7 +218,11 @@ pub enum Inline {
     Text(String),
     Emphasis(NonEmpty<Inline>),
     Strong(NonEmpty<Inline>),
-    Link { href: String, content: Vec<Inline> },
+    Link {
+        target: LinkTarget,
+        content: Vec<Inline>,
+    },
+    Anchor(Anchor),
 }
 
 #[cfg(test)]
