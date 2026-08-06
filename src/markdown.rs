@@ -1,6 +1,4 @@
-use crate::ir::{Block, Inline, ListItem};
-
-const MAX_HEADING_LEVEL: u8 = 6;
+use crate::ir::{Block, Cell, HeadingLevel, Inline, ListItem, ListKind, ResourcePath, Table};
 
 pub fn emit(blocks: &[Block]) -> String {
     blocks
@@ -8,18 +6,16 @@ pub fn emit(blocks: &[Block]) -> String {
         .map(|block| match block {
             Block::Heading { level, content } => emit_heading(*level, content),
             Block::Paragraph { content } => emit_paragraph(content),
-            Block::List { ordered, items } => emit_list(*ordered, items),
-            Block::Table { headers, rows } => emit_table(headers, rows),
+            Block::List { kind, items } => emit_list(*kind, items),
+            Block::Table(table) => emit_table(table),
             Block::Image { src, alt } => emit_image(src, alt),
         })
-        .filter(|rendered| !rendered.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-pub fn emit_heading(level: u8, content: &[Inline]) -> String {
-    let level = level.clamp(1, MAX_HEADING_LEVEL);
-    let hashes = "#".repeat(level as usize);
+pub fn emit_heading(level: HeadingLevel, content: &[Inline]) -> String {
+    let hashes = "#".repeat(level.get() as usize);
     format!("{hashes} {}", emit_inline(content))
 }
 
@@ -27,57 +23,55 @@ pub fn emit_paragraph(content: &[Inline]) -> String {
     emit_inline(content)
 }
 
-pub fn emit_list(ordered: bool, items: &[ListItem]) -> String {
+pub fn emit_list(kind: ListKind, items: &[ListItem]) -> String {
     items
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let marker = if ordered {
-                format!("{}. ", index + 1)
-            } else {
-                "- ".to_string()
+            let marker = match kind {
+                ListKind::Ordered => format!("{}. ", index + 1),
+                ListKind::Unordered => "- ".to_string(),
             };
-            format!("{marker}{}", emit_inline(&item.content))
+            format!("{marker}{}", emit_inline(item.content()))
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-pub fn emit_table(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
-    let column_count = headers
-        .len()
-        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    if column_count == 0 {
-        return String::new();
-    }
-
+pub fn emit_table(table: &Table) -> String {
     let mut lines = vec![
-        emit_row(headers, column_count),
-        format!("|{}", " --- |".repeat(column_count)),
+        emit_header_row(table),
+        format!("|{}", " --- |".repeat(table.columns().get())),
     ];
-    lines.extend(rows.iter().map(|row| emit_row(row, column_count)));
+    lines.extend(table.rows().map(emit_row));
     lines.join("\n")
 }
 
-fn emit_row(cells: &[Vec<Inline>], column_count: usize) -> String {
+fn emit_header_row(table: &Table) -> String {
+    match table.headers() {
+        Some(cells) => emit_row(cells),
+        None => format!("|{}", "  |".repeat(table.columns().get())),
+    }
+}
+
+fn emit_row(cells: &[Cell]) -> String {
     let mut result = String::from("|");
-    for index in 0..column_count {
-        let cell = cells.get(index).map(|c| emit_cell(c)).unwrap_or_default();
-        result.push_str(&format!(" {cell} |"));
+    for cell in cells {
+        result.push_str(&format!(" {} |", emit_cell(cell)));
     }
     result
 }
 
-fn emit_cell(content: &[Inline]) -> String {
-    emit_inline(content).replace('|', "\\|")
+fn emit_cell(cell: &Cell) -> String {
+    emit_inline(cell.content()).replace('|', "\\|")
 }
 
-pub fn emit_image(src: &str, alt: &str) -> String {
-    format!("![{alt}]({src})")
+pub fn emit_image(src: &ResourcePath, alt: &str) -> String {
+    format!("![{alt}]({})", src.as_str())
 }
 
-pub fn collect_image_sources(blocks: &[Block]) -> Vec<String> {
-    let mut sources: Vec<String> = Vec::new();
+pub fn collect_image_sources(blocks: &[Block]) -> Vec<ResourcePath> {
+    let mut sources: Vec<ResourcePath> = Vec::new();
     for block in blocks {
         if let Block::Image { src, .. } = block
             && !sources.iter().any(|seen| seen == src)
@@ -93,18 +87,8 @@ pub fn emit_inline(content: &[Inline]) -> String {
     for inline in content {
         match inline {
             Inline::Text(text) => result.push_str(text),
-            Inline::Emphasis(inner) => {
-                let inner = emit_inline(inner);
-                if !inner.is_empty() {
-                    result.push_str(&format!("*{inner}*"));
-                }
-            }
-            Inline::Strong(inner) => {
-                let inner = emit_inline(inner);
-                if !inner.is_empty() {
-                    result.push_str(&format!("**{inner}**"));
-                }
-            }
+            Inline::Emphasis(inner) => result.push_str(&format!("*{}*", emit_inline(inner))),
+            Inline::Strong(inner) => result.push_str(&format!("**{}**", emit_inline(inner))),
             Inline::Link { href, content } => {
                 result.push_str(&format!("[{}]({href})", emit_inline(content)));
             }
@@ -116,6 +100,21 @@ pub fn emit_inline(content: &[Inline]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::NonEmpty;
+
+    fn table(headers: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>) -> Table {
+        Table::new(
+            if headers.is_empty() {
+                None
+            } else {
+                Some(headers.into_iter().map(Cell::new).collect())
+            },
+            rows.into_iter()
+                .map(|row| row.into_iter().map(Cell::new).collect())
+                .collect(),
+        )
+        .unwrap()
+    }
 
     mod emit {
         use super::*;
@@ -124,11 +123,11 @@ mod tests {
         fn when_multiple_blocks_then_joins_with_blank_lines() {
             let blocks = vec![
                 Block::Heading {
-                    level: 1,
-                    content: vec![Inline::Text("Title".to_string())],
+                    level: HeadingLevel::new(1).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
                 },
                 Block::Paragraph {
-                    content: vec![Inline::Text("Body.".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("Body.".to_string())]).unwrap(),
                 },
             ];
 
@@ -139,24 +138,22 @@ mod tests {
         fn when_every_block_kind_present_then_emits_each() {
             let blocks = vec![
                 Block::Heading {
-                    level: 2,
-                    content: vec![Inline::Text("H".to_string())],
+                    level: HeadingLevel::new(2).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("H".to_string())]).unwrap(),
                 },
                 Block::Paragraph {
-                    content: vec![Inline::Text("P".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("P".to_string())]).unwrap(),
                 },
                 Block::List {
-                    ordered: false,
-                    items: vec![ListItem {
-                        content: vec![Inline::Text("L".to_string())],
-                    }],
+                    kind: ListKind::Unordered,
+                    items: NonEmpty::new(vec![
+                        ListItem::new(vec![Inline::Text("L".to_string())]).unwrap(),
+                    ])
+                    .unwrap(),
                 },
-                Block::Table {
-                    headers: vec![vec![Inline::Text("T".to_string())]],
-                    rows: vec![],
-                },
+                Block::Table(table(vec![vec![Inline::Text("T".to_string())]], vec![])),
                 Block::Image {
-                    src: "a.png".to_string(),
+                    src: ResourcePath::resolve("", "a.png"),
                     alt: "A".to_string(),
                 },
             ];
@@ -165,21 +162,6 @@ mod tests {
                 emit(&blocks),
                 "## H\n\nP\n\n- L\n\n| T |\n| --- |\n\n![A](a.png)"
             );
-        }
-
-        #[test]
-        fn when_block_renders_empty_then_omitted() {
-            let blocks = vec![
-                Block::Table {
-                    headers: vec![],
-                    rows: vec![],
-                },
-                Block::Paragraph {
-                    content: vec![Inline::Text("Only".to_string())],
-                },
-            ];
-
-            assert_eq!(emit(&blocks), "Only");
         }
 
         #[test]
@@ -195,35 +177,30 @@ mod tests {
         fn when_level_one_then_emits_single_hash() {
             let content = vec![Inline::Text("Chapter One".to_string())];
 
-            assert_eq!(emit_heading(1, &content), "# Chapter One");
+            assert_eq!(
+                emit_heading(HeadingLevel::new(1).unwrap(), &content),
+                "# Chapter One"
+            );
         }
 
         #[test]
         fn when_level_two_then_emits_two_hashes() {
             let content = vec![Inline::Text("Section".to_string())];
 
-            assert_eq!(emit_heading(2, &content), "## Section");
+            assert_eq!(
+                emit_heading(HeadingLevel::new(2).unwrap(), &content),
+                "## Section"
+            );
         }
 
         #[test]
         fn when_level_six_then_emits_six_hashes() {
             let content = vec![Inline::Text("Deep".to_string())];
 
-            assert_eq!(emit_heading(6, &content), "###### Deep");
-        }
-
-        #[test]
-        fn when_level_above_six_then_clamps_to_six() {
-            let content = vec![Inline::Text("Too deep".to_string())];
-
-            assert_eq!(emit_heading(7, &content), "###### Too deep");
-        }
-
-        #[test]
-        fn when_level_zero_then_clamps_to_one() {
-            let content = vec![Inline::Text("Too shallow".to_string())];
-
-            assert_eq!(emit_heading(0, &content), "# Too shallow");
+            assert_eq!(
+                emit_heading(HeadingLevel::new(6).unwrap(), &content),
+                "###### Deep"
+            );
         }
 
         #[test]
@@ -233,17 +210,23 @@ mod tests {
                 Inline::Text("World".to_string()),
             ];
 
-            assert_eq!(emit_heading(1, &content), "# Hello World");
+            assert_eq!(
+                emit_heading(HeadingLevel::new(1).unwrap(), &content),
+                "# Hello World"
+            );
         }
 
         #[test]
         fn when_content_has_emphasis_then_emits_emphasis_markers() {
             let content = vec![
                 Inline::Text("Hello ".to_string()),
-                Inline::Emphasis(vec![Inline::Text("World".to_string())]),
+                Inline::Emphasis(NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()),
             ];
 
-            assert_eq!(emit_heading(1, &content), "# Hello *World*");
+            assert_eq!(
+                emit_heading(HeadingLevel::new(1).unwrap(), &content),
+                "# Hello *World*"
+            );
         }
 
         #[test]
@@ -253,12 +236,15 @@ mod tests {
                 content: vec![Inline::Text("here".to_string())],
             }];
 
-            assert_eq!(emit_heading(2, &content), "## [here](https://example.com)");
+            assert_eq!(
+                emit_heading(HeadingLevel::new(2).unwrap(), &content),
+                "## [here](https://example.com)"
+            );
         }
 
         #[test]
         fn when_content_is_empty_then_emits_hashes_only() {
-            assert_eq!(emit_heading(1, &[]), "# ");
+            assert_eq!(emit_heading(HeadingLevel::new(1).unwrap(), &[]), "# ");
         }
     }
 
@@ -286,7 +272,7 @@ mod tests {
         fn when_content_has_emphasis_then_emits_emphasis_markers() {
             let content = vec![
                 Inline::Text("Hello ".to_string()),
-                Inline::Emphasis(vec![Inline::Text("world".to_string())]),
+                Inline::Emphasis(NonEmpty::new(vec![Inline::Text("world".to_string())]).unwrap()),
                 Inline::Text(".".to_string()),
             ];
 
@@ -295,7 +281,9 @@ mod tests {
 
         #[test]
         fn when_content_has_strong_then_emits_strong_markers() {
-            let content = vec![Inline::Strong(vec![Inline::Text("important".to_string())])];
+            let content = vec![Inline::Strong(
+                NonEmpty::new(vec![Inline::Text("important".to_string())]).unwrap(),
+            )];
 
             assert_eq!(emit_paragraph(&content), "**important**");
         }
@@ -326,73 +314,71 @@ mod tests {
         use super::*;
 
         fn item(text: &str) -> ListItem {
-            ListItem {
-                content: vec![Inline::Text(text.to_string())],
-            }
+            ListItem::new(vec![Inline::Text(text.to_string())]).unwrap()
         }
 
         #[test]
         fn when_unordered_then_emits_hyphen_markers() {
             let items = vec![item("First"), item("Second")];
 
-            assert_eq!(emit_list(false, &items), "- First\n- Second");
+            assert_eq!(emit_list(ListKind::Unordered, &items), "- First\n- Second");
         }
 
         #[test]
         fn when_ordered_then_emits_incrementing_numbers() {
             let items = vec![item("First"), item("Second"), item("Third")];
 
-            assert_eq!(emit_list(true, &items), "1. First\n2. Second\n3. Third");
+            assert_eq!(
+                emit_list(ListKind::Ordered, &items),
+                "1. First\n2. Second\n3. Third"
+            );
         }
 
         #[test]
         fn when_single_item_then_emits_one_line() {
             let items = vec![item("Only")];
 
-            assert_eq!(emit_list(false, &items), "- Only");
+            assert_eq!(emit_list(ListKind::Unordered, &items), "- Only");
         }
 
         #[test]
         fn when_item_has_emphasis_then_emits_emphasis_markers() {
-            let items = vec![ListItem {
-                content: vec![
+            let items = vec![
+                ListItem::new(vec![
                     Inline::Text("Hello ".to_string()),
-                    Inline::Emphasis(vec![Inline::Text("World".to_string())]),
-                ],
-            }];
+                    Inline::Emphasis(
+                        NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap(),
+                    ),
+                ])
+                .unwrap(),
+            ];
 
-            assert_eq!(emit_list(false, &items), "- Hello *World*");
+            assert_eq!(emit_list(ListKind::Unordered, &items), "- Hello *World*");
         }
 
         #[test]
         fn when_item_has_link_then_emits_link_syntax() {
-            let items = vec![ListItem {
-                content: vec![
+            let items = vec![
+                ListItem::new(vec![
                     Inline::Text("See ".to_string()),
                     Inline::Link {
                         href: "chapter2.xhtml".to_string(),
                         content: vec![Inline::Text("Chapter 2".to_string())],
                     },
-                ],
-            }];
+                ])
+                .unwrap(),
+            ];
 
             assert_eq!(
-                emit_list(true, &items),
+                emit_list(ListKind::Ordered, &items),
                 "1. See [Chapter 2](chapter2.xhtml)"
             );
         }
 
         #[test]
-        fn when_item_content_is_empty_then_emits_marker_only() {
-            let items = vec![ListItem { content: vec![] }];
-
-            assert_eq!(emit_list(false, &items), "- ");
-        }
-
-        #[test]
         fn when_no_items_then_emits_empty_string() {
-            assert_eq!(emit_list(false, &[]), "");
-            assert_eq!(emit_list(true, &[]), "");
+            assert_eq!(emit_list(ListKind::Unordered, &[]), "");
+            assert_eq!(emit_list(ListKind::Ordered, &[]), "");
         }
     }
 
@@ -412,7 +398,7 @@ mod tests {
             ];
 
             assert_eq!(
-                emit_table(&headers, &rows),
+                emit_table(&table(headers, rows)),
                 "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |"
             );
         }
@@ -422,21 +408,30 @@ mod tests {
             let headers = vec![cell("Key")];
             let rows = vec![vec![cell("Value")]];
 
-            assert_eq!(emit_table(&headers, &rows), "| Key |\n| --- |\n| Value |");
+            assert_eq!(
+                emit_table(&table(headers, rows)),
+                "| Key |\n| --- |\n| Value |"
+            );
         }
 
         #[test]
         fn when_no_headers_then_emits_blank_header_row() {
             let rows = vec![vec![cell("A"), cell("B")]];
 
-            assert_eq!(emit_table(&[], &rows), "|  |  |\n| --- | --- |\n| A | B |");
+            assert_eq!(
+                emit_table(&table(vec![], rows)),
+                "|  |  |\n| --- | --- |\n| A | B |"
+            );
         }
 
         #[test]
         fn when_headers_only_then_emits_header_and_separator() {
             let headers = vec![cell("Name"), cell("Age")];
 
-            assert_eq!(emit_table(&headers, &[]), "| Name | Age |\n| --- | --- |");
+            assert_eq!(
+                emit_table(&table(headers, vec![])),
+                "| Name | Age |\n| --- | --- |"
+            );
         }
 
         #[test]
@@ -445,7 +440,7 @@ mod tests {
             let rows = vec![vec![cell("1")]];
 
             assert_eq!(
-                emit_table(&headers, &rows),
+                emit_table(&table(headers, rows)),
                 "| A | B | C |\n| --- | --- | --- |\n| 1 |  |  |"
             );
         }
@@ -456,7 +451,7 @@ mod tests {
             let rows = vec![vec![cell("1"), cell("2")]];
 
             assert_eq!(
-                emit_table(&headers, &rows),
+                emit_table(&table(headers, rows)),
                 "| A |  |\n| --- | --- |\n| 1 | 2 |"
             );
         }
@@ -470,7 +465,7 @@ mod tests {
             }]]];
 
             assert_eq!(
-                emit_table(&headers, &rows),
+                emit_table(&table(headers, rows)),
                 "| Link |\n| --- |\n| [here](x.xhtml) |"
             );
         }
@@ -481,7 +476,7 @@ mod tests {
             let rows = vec![vec![cell("a | b")]];
 
             assert_eq!(
-                emit_table(&headers, &rows),
+                emit_table(&table(headers, rows)),
                 "| Expr |\n| --- |\n| a \\| b |"
             );
         }
@@ -492,14 +487,9 @@ mod tests {
             let rows = vec![vec![vec![], cell("2")]];
 
             assert_eq!(
-                emit_table(&headers, &rows),
+                emit_table(&table(headers, rows)),
                 "| A | B |\n| --- | --- |\n|  | 2 |"
             );
-        }
-
-        #[test]
-        fn when_no_headers_and_no_rows_then_emits_empty_string() {
-            assert_eq!(emit_table(&[], &[]), "");
         }
     }
 
@@ -508,18 +498,27 @@ mod tests {
 
         #[test]
         fn when_src_and_alt_then_emits_image_syntax() {
-            assert_eq!(emit_image("cover.jpg", "Cover"), "![Cover](cover.jpg)");
+            assert_eq!(
+                emit_image(&ResourcePath::resolve("", "cover.jpg"), "Cover"),
+                "![Cover](cover.jpg)"
+            );
         }
 
         #[test]
         fn when_alt_is_empty_then_emits_empty_brackets() {
-            assert_eq!(emit_image("figure1.png", ""), "![](figure1.png)");
+            assert_eq!(
+                emit_image(&ResourcePath::resolve("", "figure1.png"), ""),
+                "![](figure1.png)"
+            );
         }
 
         #[test]
         fn when_nested_path_then_emits_full_path() {
             assert_eq!(
-                emit_image("Images/ch1/figure1.png", "Figure 1"),
+                emit_image(
+                    &ResourcePath::resolve("", "Images/ch1/figure1.png"),
+                    "Figure 1"
+                ),
                 "![Figure 1](Images/ch1/figure1.png)"
             );
         }
@@ -530,7 +529,7 @@ mod tests {
 
         fn image(src: &str) -> Block {
             Block::Image {
-                src: src.to_string(),
+                src: ResourcePath::resolve("", src),
                 alt: String::new(),
             }
         }
@@ -539,44 +538,62 @@ mod tests {
         fn when_blocks_have_images_then_collects_sources_in_order() {
             let blocks = vec![image("a.png"), image("b.png")];
 
-            assert_eq!(collect_image_sources(&blocks), vec!["a.png", "b.png"]);
+            assert_eq!(
+                collect_image_sources(&blocks)
+                    .iter()
+                    .map(ResourcePath::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["a.png", "b.png"]
+            );
         }
 
         #[test]
         fn when_same_source_repeats_then_collects_it_once() {
             let blocks = vec![image("a.png"), image("b.png"), image("a.png")];
 
-            assert_eq!(collect_image_sources(&blocks), vec!["a.png", "b.png"]);
+            assert_eq!(
+                collect_image_sources(&blocks)
+                    .iter()
+                    .map(ResourcePath::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["a.png", "b.png"]
+            );
         }
 
         #[test]
         fn when_non_image_blocks_present_then_ignores_them() {
             let blocks = vec![
                 Block::Paragraph {
-                    content: vec![Inline::Text("text".to_string())],
+                    content: NonEmpty::new(vec![Inline::Text("text".to_string())]).unwrap(),
                 },
                 image("a.png"),
                 Block::Heading {
-                    level: 1,
-                    content: vec![Inline::Text("Title".to_string())],
+                    level: HeadingLevel::new(1).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
                 },
             ];
 
-            assert_eq!(collect_image_sources(&blocks), vec!["a.png"]);
+            assert_eq!(
+                collect_image_sources(&blocks)
+                    .iter()
+                    .map(ResourcePath::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["a.png"]
+            );
         }
 
         #[test]
         fn when_no_images_then_returns_empty() {
             let blocks = vec![Block::Paragraph {
-                content: vec![Inline::Text("text".to_string())],
+                content: NonEmpty::new(vec![Inline::Text("text".to_string())]).unwrap(),
             }];
 
-            assert_eq!(collect_image_sources(&blocks), Vec::<String>::new());
+            assert_eq!(collect_image_sources(&blocks), Vec::<ResourcePath>::new());
         }
 
         #[test]
         fn when_no_blocks_then_returns_empty() {
-            assert_eq!(collect_image_sources(&[]), Vec::<String>::new());
+            assert_eq!(collect_image_sources(&[]), Vec::<ResourcePath>::new());
         }
     }
 
@@ -592,14 +609,18 @@ mod tests {
 
         #[test]
         fn when_emphasis_then_wraps_in_single_asterisks() {
-            let content = vec![Inline::Emphasis(vec![Inline::Text("World".to_string())])];
+            let content = vec![Inline::Emphasis(
+                NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap(),
+            )];
 
             assert_eq!(emit_inline(&content), "*World*");
         }
 
         #[test]
         fn when_strong_then_wraps_in_double_asterisks() {
-            let content = vec![Inline::Strong(vec![Inline::Text("World".to_string())])];
+            let content = vec![Inline::Strong(
+                NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap(),
+            )];
 
             assert_eq!(emit_inline(&content), "**World**");
         }
@@ -616,10 +637,15 @@ mod tests {
 
         #[test]
         fn when_strong_nested_in_emphasis_then_nests_markers() {
-            let content = vec![Inline::Emphasis(vec![
-                Inline::Text("very ".to_string()),
-                Inline::Strong(vec![Inline::Text("important".to_string())]),
-            ])];
+            let content = vec![Inline::Emphasis(
+                NonEmpty::new(vec![
+                    Inline::Text("very ".to_string()),
+                    Inline::Strong(
+                        NonEmpty::new(vec![Inline::Text("important".to_string())]).unwrap(),
+                    ),
+                ])
+                .unwrap(),
+            )];
 
             assert_eq!(emit_inline(&content), "*very **important***");
         }
@@ -628,7 +654,9 @@ mod tests {
         fn when_emphasis_nested_in_link_then_nests_markers() {
             let content = vec![Inline::Link {
                 href: "x.xhtml".to_string(),
-                content: vec![Inline::Emphasis(vec![Inline::Text("Chapter".to_string())])],
+                content: vec![Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text("Chapter".to_string())]).unwrap(),
+                )],
             }];
 
             assert_eq!(emit_inline(&content), "[*Chapter*](x.xhtml)");
@@ -638,26 +666,12 @@ mod tests {
         fn when_multiple_inlines_in_sequence_then_emits_all_in_order() {
             let content = vec![
                 Inline::Text("A ".to_string()),
-                Inline::Emphasis(vec![Inline::Text("B".to_string())]),
+                Inline::Emphasis(NonEmpty::new(vec![Inline::Text("B".to_string())]).unwrap()),
                 Inline::Text(" C ".to_string()),
-                Inline::Strong(vec![Inline::Text("D".to_string())]),
+                Inline::Strong(NonEmpty::new(vec![Inline::Text("D".to_string())]).unwrap()),
             ];
 
             assert_eq!(emit_inline(&content), "A *B* C **D**");
-        }
-
-        #[test]
-        fn when_emphasis_content_is_empty_then_omits_markers() {
-            let content = vec![Inline::Emphasis(vec![])];
-
-            assert_eq!(emit_inline(&content), "");
-        }
-
-        #[test]
-        fn when_strong_content_is_empty_then_omits_markers() {
-            let content = vec![Inline::Strong(vec![])];
-
-            assert_eq!(emit_inline(&content), "");
         }
 
         #[test]

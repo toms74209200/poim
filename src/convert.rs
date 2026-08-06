@@ -1,18 +1,19 @@
 use crate::epub::{self, EpubError};
+use crate::ir::ResourcePath;
 use crate::markdown;
 use crate::xhtml;
 use crate::zip;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtractedImage {
-    pub path: String,
+    pub path: ResourcePath,
     pub data: Vec<u8>,
 }
 
 pub fn epub_to_markdown(data: &[u8]) -> Result<String, EpubError> {
     let rendered: Vec<String> = read_spine_documents(data)?
         .iter()
-        .map(|(_, content)| markdown::emit(&xhtml::parse_blocks(content)))
+        .map(|(path, content)| markdown::emit(&xhtml::parse_blocks(content, path.parent())))
         .filter(|rendered| !rendered.is_empty())
         .collect();
 
@@ -23,13 +24,12 @@ pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
     let mut images: Vec<ExtractedImage> = Vec::new();
 
     for (document_path, content) in read_spine_documents(data)? {
-        let base = parent_dir(&document_path);
-        for src in markdown::collect_image_sources(&xhtml::parse_blocks(&content)) {
-            let path = resolve_path(base, &src);
+        let blocks = xhtml::parse_blocks(&content, document_path.parent());
+        for path in markdown::collect_image_sources(&blocks) {
             if images.iter().any(|image| image.path == path) {
                 continue;
             }
-            if let Ok(bytes) = zip::extract_by_name(data, path.as_bytes()) {
+            if let Ok(bytes) = zip::extract_by_name(data, path.as_str().as_bytes()) {
                 images.push(ExtractedImage { path, data: bytes });
             }
         }
@@ -38,52 +38,26 @@ pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
     Ok(images)
 }
 
-fn read_spine_documents(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, EpubError> {
+fn read_spine_documents(data: &[u8]) -> Result<Vec<(ResourcePath, Vec<u8>)>, EpubError> {
     let opf_path = epub::find_opf_path_from_epub(data)?;
     let opf = zip::extract_by_name(data, opf_path.as_bytes()).map_err(EpubError::ZipError)?;
-    let hrefs = epub::parse_spine(&opf)?;
-    let base = parent_dir(&opf_path);
+    let opf_path = ResourcePath::resolve("", &opf_path);
 
     let mut documents = Vec::new();
-    for href in &hrefs {
-        let path = resolve_path(base, href);
-        let content = zip::extract_by_name(data, path.as_bytes()).map_err(EpubError::ZipError)?;
+    for href in epub::parse_spine(&opf)? {
+        let path = ResourcePath::resolve(opf_path.parent(), &href);
+        let content =
+            zip::extract_by_name(data, path.as_str().as_bytes()).map_err(EpubError::ZipError)?;
         documents.push((path, content));
     }
 
     Ok(documents)
 }
 
-fn parent_dir(path: &str) -> &str {
-    match path.rfind('/') {
-        Some(index) => &path[..index],
-        None => "",
-    }
-}
-
-fn resolve_path(base: &str, href: &str) -> String {
-    let combined = if base.is_empty() {
-        href.to_string()
-    } else {
-        format!("{base}/{href}")
-    };
-
-    let mut segments: Vec<&str> = Vec::new();
-    for segment in combined.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                segments.pop();
-            }
-            name => segments.push(name),
-        }
-    }
-    segments.join("/")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ResourcePath;
 
     const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
     const CENTRAL_DIR_SIGNATURE: u32 = 0x02014b50;
@@ -175,66 +149,6 @@ mod tests {
   </rootfiles>
 </container>"#;
 
-    mod resolve_path {
-        use super::*;
-
-        #[test]
-        fn when_base_is_empty_then_returns_href() {
-            assert_eq!(resolve_path("", "chapter1.xhtml"), "chapter1.xhtml");
-        }
-
-        #[test]
-        fn when_base_is_directory_then_joins_with_slash() {
-            assert_eq!(
-                resolve_path("OEBPS", "chapter1.xhtml"),
-                "OEBPS/chapter1.xhtml"
-            );
-        }
-
-        #[test]
-        fn when_href_is_nested_then_keeps_nesting() {
-            assert_eq!(
-                resolve_path("OEBPS", "Text/chapter1.xhtml"),
-                "OEBPS/Text/chapter1.xhtml"
-            );
-        }
-
-        #[test]
-        fn when_href_has_current_dir_then_removes_it() {
-            assert_eq!(
-                resolve_path("OEBPS", "./chapter1.xhtml"),
-                "OEBPS/chapter1.xhtml"
-            );
-        }
-
-        #[test]
-        fn when_href_has_parent_dir_then_resolves_it() {
-            assert_eq!(
-                resolve_path("OEBPS/Text", "../Images/figure.xhtml"),
-                "OEBPS/Images/figure.xhtml"
-            );
-        }
-    }
-
-    mod parent_dir {
-        use super::*;
-
-        #[test]
-        fn when_path_has_directory_then_returns_it() {
-            assert_eq!(parent_dir("OEBPS/content.opf"), "OEBPS");
-        }
-
-        #[test]
-        fn when_path_is_nested_then_returns_full_directory() {
-            assert_eq!(parent_dir("EPUB/package/content.opf"), "EPUB/package");
-        }
-
-        #[test]
-        fn when_path_has_no_directory_then_returns_empty() {
-            assert_eq!(parent_dir("content.opf"), "");
-        }
-    }
-
     mod epub_to_markdown {
         use super::*;
 
@@ -300,7 +214,7 @@ mod tests {
 
             assert_eq!(
                 markdown,
-                "# Title\n\nIntro.\n\n- One\n- Two\n\nAfter list.\n\n![Figure](figure.png)"
+                "# Title\n\nIntro.\n\n- One\n- Two\n\nAfter list.\n\n![Figure](OEBPS/figure.png)"
             );
         }
 
@@ -374,6 +288,31 @@ mod tests {
     mod extract_images {
         use super::*;
 
+        #[test]
+        fn when_chapter_is_nested_then_markdown_and_extracted_paths_agree() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="Text/chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let chapter = br#"<img src="../Images/fig.png" alt="Figure"/>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/Text/chapter1.xhtml", chapter)
+                .add("OEBPS/Images/fig.png", b"PNG")
+                .build();
+
+            let markdown = epub_to_markdown(&epub).unwrap();
+            let extracted = extract_images(&epub).unwrap();
+
+            assert_eq!(extracted.len(), 1);
+            assert!(
+                markdown.contains(extracted[0].path.as_str()),
+                "markdown {markdown:?} does not reference extracted {:?}",
+                extracted[0].path
+            );
+        }
+
         const SINGLE_CHAPTER_OPF: &[u8] = br#"<package>
   <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
   <spine><itemref idref="ch1"/></spine>
@@ -394,7 +333,7 @@ mod tests {
             assert_eq!(
                 images,
                 vec![ExtractedImage {
-                    path: "OEBPS/figure.png".to_string(),
+                    path: ResourcePath::resolve("", "OEBPS/figure.png"),
                     data: b"PNGDATA".to_vec(),
                 }]
             );
@@ -419,7 +358,7 @@ mod tests {
             assert_eq!(
                 images,
                 vec![ExtractedImage {
-                    path: "OEBPS/Images/figure.png".to_string(),
+                    path: ResourcePath::resolve("", "OEBPS/Images/figure.png"),
                     data: b"PNGDATA".to_vec(),
                 }]
             );
@@ -467,7 +406,7 @@ mod tests {
             assert_eq!(
                 images,
                 vec![ExtractedImage {
-                    path: "OEBPS/shared.png".to_string(),
+                    path: ResourcePath::resolve("", "OEBPS/shared.png"),
                     data: b"SHARED".to_vec(),
                 }]
             );
@@ -489,7 +428,7 @@ mod tests {
             assert_eq!(
                 images,
                 vec![ExtractedImage {
-                    path: "OEBPS/present.png".to_string(),
+                    path: ResourcePath::resolve("", "OEBPS/present.png"),
                     data: b"HERE".to_vec(),
                 }]
             );
