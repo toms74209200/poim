@@ -1,5 +1,6 @@
 use crate::ir::{
-    Block, Cell, HeadingLevel, Inline, ListItem, ListKind, NonEmpty, ResourcePath, Table,
+    Anchor, Block, Cell, HeadingLevel, Inline, LinkTarget, ListItem, ListKind, NonEmpty,
+    ResourcePath, Table,
 };
 
 enum BlockKind {
@@ -10,7 +11,8 @@ enum BlockKind {
     Image,
 }
 
-pub fn parse_blocks(xhtml: &[u8], base: &str) -> Vec<Block> {
+pub fn parse_blocks(xhtml: &[u8], document: &ResourcePath) -> Vec<Block> {
+    let base = document.parent();
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -19,13 +21,17 @@ pub fn parse_blocks(xhtml: &[u8], base: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut pos = 0;
     while let Some((tag_start, kind)) = next_block_start(xml, pos) {
+        if let Some(anchor) = element_anchor(xml, tag_start, document) {
+            blocks.push(Block::Anchor(anchor));
+        }
         pos = match kind {
             BlockKind::Heading(level) => {
                 match element_bounds(xml, tag_start, &format!("</h{level}>")) {
                     Some((content_start, content_end, next)) => {
-                        if let Some(block) =
-                            build_heading(level, parse_inline(&xml[content_start..content_end]))
-                        {
+                        if let Some(block) = build_heading(
+                            level,
+                            parse_inline(&xml[content_start..content_end], document),
+                        ) {
                             blocks.push(block);
                         }
                         next
@@ -36,7 +42,7 @@ pub fn parse_blocks(xhtml: &[u8], base: &str) -> Vec<Block> {
             BlockKind::Paragraph => match element_bounds(xml, tag_start, "</p>") {
                 Some((content_start, content_end, next)) => {
                     let inner = &xml[content_start..content_end];
-                    if let Some(content) = NonEmpty::new(parse_inline(inner)) {
+                    if let Some(content) = NonEmpty::new(parse_inline(inner, document)) {
                         blocks.push(Block::Paragraph { content });
                     }
                     blocks.extend(parse_images(inner.as_bytes(), base));
@@ -51,7 +57,7 @@ pub fn parse_blocks(xhtml: &[u8], base: &str) -> Vec<Block> {
                 };
                 match element_bounds(xml, tag_start, close_tag) {
                     Some((content_start, content_end, next)) => {
-                        let items = parse_list_items(&xml[content_start..content_end]);
+                        let items = parse_list_items(&xml[content_start..content_end], document);
                         if let Some(items) = NonEmpty::new(items) {
                             blocks.push(Block::List { kind, items });
                         }
@@ -62,7 +68,9 @@ pub fn parse_blocks(xhtml: &[u8], base: &str) -> Vec<Block> {
             }
             BlockKind::Table => match element_bounds(xml, tag_start, "</table>") {
                 Some((content_start, content_end, next)) => {
-                    if let Some(block) = parse_table_content(&xml[content_start..content_end]) {
+                    if let Some(block) =
+                        parse_table_content(&xml[content_start..content_end], document)
+                    {
                         blocks.push(block);
                     }
                     next
@@ -117,6 +125,12 @@ fn element_bounds(xml: &str, tag_start: usize, close_tag: &str) -> Option<(usize
     Some((content_start, content_end, content_end + close_tag.len()))
 }
 
+fn element_anchor(xml: &str, tag_start: usize, document: &ResourcePath) -> Option<Anchor> {
+    let tag_end = tag_start + xml[tag_start..].find('>')?;
+    let id = extract_attribute(&xml[tag_start..=tag_end], "id")?;
+    Some(Anchor::new(document, Some(id)))
+}
+
 fn skip_open_tag(xml: &str, tag_start: usize) -> usize {
     match xml[tag_start..].find('>') {
         Some(rel) => tag_start + rel + 1,
@@ -124,7 +138,7 @@ fn skip_open_tag(xml: &str, tag_start: usize) -> usize {
     }
 }
 
-pub fn parse_headings(xhtml: &[u8]) -> Vec<Block> {
+pub fn parse_headings(xhtml: &[u8], document: &ResourcePath) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -148,7 +162,10 @@ pub fn parse_headings(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        if let Some(block) = build_heading(level, parse_inline(&xml[content_start..content_end])) {
+        if let Some(block) = build_heading(
+            level,
+            parse_inline(&xml[content_start..content_end], document),
+        ) {
             blocks.push(block);
         }
 
@@ -158,7 +175,7 @@ pub fn parse_headings(xhtml: &[u8]) -> Vec<Block> {
     blocks
 }
 
-pub fn parse_paragraphs(xhtml: &[u8]) -> Vec<Block> {
+pub fn parse_paragraphs(xhtml: &[u8], document: &ResourcePath) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -181,7 +198,9 @@ pub fn parse_paragraphs(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        if let Some(content) = NonEmpty::new(parse_inline(&xml[content_start..content_end])) {
+        if let Some(content) =
+            NonEmpty::new(parse_inline(&xml[content_start..content_end], document))
+        {
             blocks.push(Block::Paragraph { content });
         }
 
@@ -191,7 +210,7 @@ pub fn parse_paragraphs(xhtml: &[u8]) -> Vec<Block> {
     blocks
 }
 
-pub fn parse_lists(xhtml: &[u8]) -> Vec<Block> {
+pub fn parse_lists(xhtml: &[u8], document: &ResourcePath) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -226,7 +245,7 @@ pub fn parse_lists(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        let items = parse_list_items(&xml[content_start..content_end]);
+        let items = parse_list_items(&xml[content_start..content_end], document);
         if let Some(items) = NonEmpty::new(items) {
             blocks.push(Block::List { kind, items });
         }
@@ -237,7 +256,7 @@ pub fn parse_lists(xhtml: &[u8]) -> Vec<Block> {
     blocks
 }
 
-fn parse_list_items(xml: &str) -> Vec<ListItem> {
+fn parse_list_items(xml: &str, document: &ResourcePath) -> Vec<ListItem> {
     let mut items = Vec::new();
     let mut search_from = 0;
     while let Some(tag_start) = find_open_tag(xml, "li", search_from) {
@@ -255,7 +274,8 @@ fn parse_list_items(xml: &str) -> Vec<ListItem> {
             }
         };
 
-        if let Some(item) = ListItem::new(parse_inline(&xml[content_start..content_end])) {
+        if let Some(item) = ListItem::new(parse_inline(&xml[content_start..content_end], document))
+        {
             items.push(item);
         }
 
@@ -265,7 +285,7 @@ fn parse_list_items(xml: &str) -> Vec<ListItem> {
     items
 }
 
-pub fn parse_tables(xhtml: &[u8]) -> Vec<Block> {
+pub fn parse_tables(xhtml: &[u8], document: &ResourcePath) -> Vec<Block> {
     let xml = match core::str::from_utf8(xhtml) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -288,7 +308,7 @@ pub fn parse_tables(xhtml: &[u8]) -> Vec<Block> {
             }
         };
 
-        if let Some(block) = parse_table_content(&xml[content_start..content_end]) {
+        if let Some(block) = parse_table_content(&xml[content_start..content_end], document) {
             blocks.push(block);
         }
 
@@ -298,7 +318,7 @@ pub fn parse_tables(xhtml: &[u8]) -> Vec<Block> {
     blocks
 }
 
-fn parse_table_content(xml: &str) -> Option<Block> {
+fn parse_table_content(xml: &str, document: &ResourcePath) -> Option<Block> {
     let mut headers: Option<Vec<Cell>> = None;
     let mut rows: Vec<Vec<Cell>> = Vec::new();
 
@@ -318,7 +338,7 @@ fn parse_table_content(xml: &str) -> Option<Block> {
             }
         };
 
-        let (cells, has_header_cell) = parse_row_cells(&xml[content_start..content_end]);
+        let (cells, has_header_cell) = parse_row_cells(&xml[content_start..content_end], document);
         if has_header_cell && headers.is_none() && rows.is_empty() {
             headers = Some(cells);
         } else if !cells.is_empty() {
@@ -331,7 +351,7 @@ fn parse_table_content(xml: &str) -> Option<Block> {
     Table::new(headers, rows).map(Block::Table)
 }
 
-fn parse_row_cells(xml: &str) -> (Vec<Cell>, bool) {
+fn parse_row_cells(xml: &str, document: &ResourcePath) -> (Vec<Cell>, bool) {
     let mut cells = Vec::new();
     let mut has_header_cell = false;
 
@@ -366,7 +386,10 @@ fn parse_row_cells(xml: &str) -> (Vec<Cell>, bool) {
         if tag_name == "th" {
             has_header_cell = true;
         }
-        cells.push(Cell::new(parse_inline(&xml[content_start..content_end])));
+        cells.push(Cell::new(parse_inline(
+            &xml[content_start..content_end],
+            document,
+        )));
 
         search_from = content_end + close_tag.len();
     }
@@ -453,7 +476,7 @@ fn find_heading_start(xml: &str, from: usize) -> Option<(usize, u8)> {
     None
 }
 
-pub fn parse_inline(xml: &str) -> Vec<Inline> {
+pub fn parse_inline(xml: &str, document: &ResourcePath) -> Vec<Inline> {
     let mut inlines = Vec::new();
     let mut text_buf = String::new();
     let mut pos = 0;
@@ -469,7 +492,7 @@ pub fn parse_inline(xml: &str) -> Vec<Inline> {
                 text_buf.push_str(&xml[pos..lt]);
 
                 match match_recognized_open_tag(xml, lt) {
-                    Some((tag, href, content_start)) => {
+                    Some((tag, open_tag, content_start)) => {
                         let close_tag = format!("</{tag}>");
                         match xml[content_start..].find(&close_tag) {
                             Some(close_rel) => {
@@ -477,19 +500,21 @@ pub fn parse_inline(xml: &str) -> Vec<Inline> {
                                     inlines.push(Inline::Text(core::mem::take(&mut text_buf)));
                                 }
                                 let content_end = content_start + close_rel;
-                                let inner = parse_inline(&xml[content_start..content_end]);
+                                let inner =
+                                    parse_inline(&xml[content_start..content_end], document);
                                 let built = match tag {
-                                    "em" => NonEmpty::new(inner).map(Inline::Emphasis),
-                                    "strong" => NonEmpty::new(inner).map(Inline::Strong),
-                                    "a" => Some(Inline::Link {
-                                        href: href.unwrap_or_default(),
-                                        content: inner,
-                                    }),
+                                    "em" => NonEmpty::new(inner)
+                                        .map(Inline::Emphasis)
+                                        .into_iter()
+                                        .collect(),
+                                    "strong" => NonEmpty::new(inner)
+                                        .map(Inline::Strong)
+                                        .into_iter()
+                                        .collect(),
+                                    "a" => build_anchor_element(open_tag, inner, document),
                                     _ => unreachable!(),
                                 };
-                                if let Some(inline) = built {
-                                    inlines.push(inline);
-                                }
+                                inlines.extend(built);
                                 pos = content_end + close_tag.len();
                             }
                             None => pos = content_start,
@@ -525,10 +550,7 @@ fn trim_edges(mut inlines: Vec<Inline>) -> Vec<Inline> {
     inlines
 }
 
-fn match_recognized_open_tag(
-    xml: &str,
-    lt: usize,
-) -> Option<(&'static str, Option<String>, usize)> {
+fn match_recognized_open_tag(xml: &str, lt: usize) -> Option<(&'static str, &str, usize)> {
     let rest = &xml[lt + 1..];
     for tag in ["strong", "em", "a"] {
         if rest.len() > tag.len()
@@ -539,17 +561,61 @@ fn match_recognized_open_tag(
             )
         {
             let tag_end_rel = rest.find('>')?;
-            let full_tag = &rest[..tag_end_rel];
-            let href = if tag == "a" {
-                extract_attribute(full_tag, "href").map(|s| s.to_string())
-            } else {
-                None
-            };
             let content_start = lt + 1 + tag_end_rel + 1;
-            return Some((tag, href, content_start));
+            return Some((tag, &rest[..tag_end_rel], content_start));
         }
     }
     None
+}
+
+fn build_anchor_element(
+    open_tag: &str,
+    content: Vec<Inline>,
+    document: &ResourcePath,
+) -> Vec<Inline> {
+    if let Some(href) = extract_attribute(open_tag, "href") {
+        return vec![Inline::Link {
+            target: resolve_link_target(href, document),
+            content,
+        }];
+    }
+    match extract_attribute(open_tag, "id") {
+        Some(id) => {
+            let mut result = vec![Inline::Anchor(Anchor::new(document, Some(id)))];
+            result.extend(content);
+            result
+        }
+        None => content,
+    }
+}
+
+fn resolve_link_target(href: &str, document: &ResourcePath) -> LinkTarget {
+    if let Some(fragment) = href.strip_prefix('#') {
+        return LinkTarget::Internal(Anchor::new(document, Some(fragment)));
+    }
+    if has_uri_scheme(href) {
+        return LinkTarget::External(href.to_string());
+    }
+    let (path, fragment) = match href.split_once('#') {
+        Some((path, fragment)) => (path, Some(fragment)),
+        None => (href, None),
+    };
+    LinkTarget::Internal(Anchor::new(
+        &ResourcePath::resolve(document.parent(), path),
+        fragment,
+    ))
+}
+
+fn has_uri_scheme(href: &str) -> bool {
+    let Some(colon) = href.find(':') else {
+        return false;
+    };
+    let scheme = &href[..colon];
+    !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }
 
 fn extract_attribute<'a>(tag: &'a str, attr_name: &str) -> Option<&'a str> {
@@ -594,6 +660,14 @@ fn build_heading(level: u8, content: Vec<Inline>) -> Option<Block> {
 mod tests {
     use super::*;
 
+    fn doc() -> ResourcePath {
+        ResourcePath::resolve("", "doc.xhtml")
+    }
+
+    fn link_target(href: &str) -> LinkTarget {
+        resolve_link_target(href, &doc())
+    }
+
     fn table(headers: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>) -> Table {
         Table::new(
             if headers.is_empty() {
@@ -615,7 +689,7 @@ mod tests {
         fn when_mixed_blocks_then_returns_document_order() {
             let xhtml = b"<h1>Title</h1><p>Intro.</p><h2>Sub</h2><p>Body.</p>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -642,7 +716,7 @@ mod tests {
         fn when_list_follows_paragraph_then_keeps_order() {
             let xhtml = b"<p>Before</p><ul><li>A</li></ul><p>After</p>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -668,7 +742,7 @@ mod tests {
         fn when_paragraph_inside_list_item_then_not_emitted_separately() {
             let xhtml = b"<ul><li><p>Nested</p></li></ul>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -686,7 +760,7 @@ mod tests {
         fn when_image_wrapped_in_paragraph_then_emits_image_block() {
             let xhtml = br#"<p><img src="figure.png" alt="Figure"/></p>"#;
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -701,7 +775,7 @@ mod tests {
         fn when_paragraph_has_text_and_image_then_emits_both() {
             let xhtml = br#"<p>Caption<img src="a.png" alt="A"/></p>"#;
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -721,7 +795,7 @@ mod tests {
         fn when_empty_paragraph_then_skipped() {
             let xhtml = b"<p></p><p>Real</p>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -735,7 +809,7 @@ mod tests {
         fn when_table_between_paragraphs_then_keeps_order() {
             let xhtml = b"<p>Before</p><table><tr><th>H</th></tr></table><p>After</p>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -755,7 +829,7 @@ mod tests {
         fn when_ordered_and_unordered_lists_then_distinguishes_them() {
             let xhtml = b"<ol><li>A</li></ol><ul><li>B</li></ul>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -782,7 +856,7 @@ mod tests {
         fn when_inline_markup_present_then_preserved_in_blocks() {
             let xhtml = br#"<p>See <a href="x.xhtml">here</a></p>"#;
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -790,7 +864,7 @@ mod tests {
                     content: NonEmpty::new(vec![
                         Inline::Text("See ".to_string()),
                         Inline::Link {
-                            href: "x.xhtml".to_string(),
+                            target: link_target("x.xhtml"),
                             content: vec![Inline::Text("here".to_string())],
                         },
                     ])
@@ -803,7 +877,7 @@ mod tests {
         fn when_unclosed_paragraph_then_does_not_loop_forever() {
             let xhtml = b"<p>Unclosed<h1>Title</h1>";
 
-            let blocks = parse_blocks(xhtml, "");
+            let blocks = parse_blocks(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -816,12 +890,12 @@ mod tests {
 
         #[test]
         fn when_no_blocks_then_returns_empty() {
-            assert_eq!(parse_blocks(b"<html><body></body></html>", ""), vec![]);
+            assert_eq!(parse_blocks(b"<html><body></body></html>", &doc()), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
-            assert_eq!(parse_blocks(b"\xff\xfe<h1>Bad</h1>", ""), vec![]);
+            assert_eq!(parse_blocks(b"\xff\xfe<h1>Bad</h1>", &doc()), vec![]);
         }
     }
 
@@ -832,7 +906,7 @@ mod tests {
         fn when_single_h1_then_returns_heading_block() {
             let xhtml = b"<h1>Chapter One</h1>";
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -847,7 +921,7 @@ mod tests {
         fn when_multiple_headings_then_returns_in_document_order() {
             let xhtml = b"<h1>Title</h1><p>ignored</p><h2>Subtitle</h2>";
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -868,7 +942,7 @@ mod tests {
         fn when_heading_has_attributes_then_still_parsed() {
             let xhtml = br#"<h2 class="chapter" id="ch1">Section</h2>"#;
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -883,7 +957,7 @@ mod tests {
         fn when_heading_has_unrecognized_nested_tags_then_strips_them_from_text() {
             let xhtml = b"<h1>Hello <span>World</span></h1>";
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -898,7 +972,7 @@ mod tests {
         fn when_heading_has_emphasis_then_returns_structured_inline() {
             let xhtml = b"<h1>Hello <em>World</em></h1>";
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -919,7 +993,7 @@ mod tests {
         fn when_heading_has_surrounding_whitespace_then_trims_it() {
             let xhtml = b"<h3>\n  Padded  \n</h3>";
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -934,28 +1008,28 @@ mod tests {
         fn when_no_headings_then_returns_empty() {
             let xhtml = b"<p>No headings here</p>";
 
-            assert_eq!(parse_headings(xhtml), vec![]);
+            assert_eq!(parse_headings(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_similarly_named_tag_then_not_mistaken_for_heading() {
             let xhtml = b"<header>Not a heading</header>";
 
-            assert_eq!(parse_headings(xhtml), vec![]);
+            assert_eq!(parse_headings(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
             let xhtml = b"\xff\xfe<h1>Bad</h1>";
 
-            assert_eq!(parse_headings(xhtml), vec![]);
+            assert_eq!(parse_headings(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_all_six_heading_levels_present_then_parses_each() {
             let xhtml = b"<h1>A</h1><h2>B</h2><h3>C</h3><h4>D</h4><h5>E</h5><h6>F</h6>";
 
-            let blocks = parse_headings(xhtml);
+            let blocks = parse_headings(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -996,7 +1070,7 @@ mod tests {
         fn when_single_paragraph_then_returns_paragraph_block() {
             let xhtml = b"<p>Hello world.</p>";
 
-            let blocks = parse_paragraphs(xhtml);
+            let blocks = parse_paragraphs(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1010,7 +1084,7 @@ mod tests {
         fn when_multiple_paragraphs_then_returns_in_document_order() {
             let xhtml = b"<h1>Title</h1><p>First.</p><p>Second.</p>";
 
-            let blocks = parse_paragraphs(xhtml);
+            let blocks = parse_paragraphs(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1029,7 +1103,7 @@ mod tests {
         fn when_paragraph_has_attributes_then_still_parsed() {
             let xhtml = br#"<p class="intro">Welcome.</p>"#;
 
-            let blocks = parse_paragraphs(xhtml);
+            let blocks = parse_paragraphs(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1043,7 +1117,7 @@ mod tests {
         fn when_paragraph_has_unrecognized_nested_tags_then_strips_them_from_text() {
             let xhtml = b"<p>Hello <span>World</span>.</p>";
 
-            let blocks = parse_paragraphs(xhtml);
+            let blocks = parse_paragraphs(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1057,7 +1131,7 @@ mod tests {
         fn when_paragraph_has_link_and_strong_then_returns_structured_inline() {
             let xhtml = br#"<p>Visit <a href="https://example.com">here</a> for <strong>details</strong>.</p>"#;
 
-            let blocks = parse_paragraphs(xhtml);
+            let blocks = parse_paragraphs(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1065,7 +1139,7 @@ mod tests {
                     content: NonEmpty::new(vec![
                         Inline::Text("Visit ".to_string()),
                         Inline::Link {
-                            href: "https://example.com".to_string(),
+                            target: link_target("https://example.com"),
                             content: vec![Inline::Text("here".to_string())],
                         },
                         Inline::Text(" for ".to_string()),
@@ -1083,14 +1157,14 @@ mod tests {
         fn when_no_paragraphs_then_returns_empty() {
             let xhtml = b"<h1>No paragraphs here</h1>";
 
-            assert_eq!(parse_paragraphs(xhtml), vec![]);
+            assert_eq!(parse_paragraphs(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
             let xhtml = b"\xff\xfe<p>Bad</p>";
 
-            assert_eq!(parse_paragraphs(xhtml), vec![]);
+            assert_eq!(parse_paragraphs(xhtml, &doc()), vec![]);
         }
     }
 
@@ -1101,7 +1175,7 @@ mod tests {
         fn when_unordered_list_then_returns_unordered_list_block() {
             let xhtml = b"<ul><li>First</li><li>Second</li></ul>";
 
-            let blocks = parse_lists(xhtml);
+            let blocks = parse_lists(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1120,7 +1194,7 @@ mod tests {
         fn when_ordered_list_then_returns_ordered_list_block() {
             let xhtml = b"<ol><li>First</li><li>Second</li></ol>";
 
-            let blocks = parse_lists(xhtml);
+            let blocks = parse_lists(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1139,7 +1213,7 @@ mod tests {
         fn when_multiple_lists_then_returns_in_document_order() {
             let xhtml = b"<ul><li>A</li></ul><p>between</p><ol><li>B</li></ol>";
 
-            let blocks = parse_lists(xhtml);
+            let blocks = parse_lists(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1166,7 +1240,7 @@ mod tests {
         fn when_list_item_has_unrecognized_nested_tags_then_strips_them_from_text() {
             let xhtml = b"<ul><li>Hello <span>World</span></li></ul>";
 
-            let blocks = parse_lists(xhtml);
+            let blocks = parse_lists(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1184,7 +1258,7 @@ mod tests {
         fn when_list_item_has_link_then_returns_structured_inline() {
             let xhtml = br#"<ul><li>See <a href="chapter2.xhtml">Chapter 2</a></li></ul>"#;
 
-            let blocks = parse_lists(xhtml);
+            let blocks = parse_lists(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1194,7 +1268,7 @@ mod tests {
                         ListItem::new(vec![
                             Inline::Text("See ".to_string()),
                             Inline::Link {
-                                href: "chapter2.xhtml".to_string(),
+                                target: link_target("chapter2.xhtml"),
                                 content: vec![Inline::Text("Chapter 2".to_string())],
                             },
                         ])
@@ -1209,7 +1283,7 @@ mod tests {
         fn when_list_has_attributes_then_still_parsed() {
             let xhtml = br#"<ul class="toc"><li>Entry</li></ul>"#;
 
-            let blocks = parse_lists(xhtml);
+            let blocks = parse_lists(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1227,21 +1301,21 @@ mod tests {
         fn when_list_has_no_items_then_returns_empty() {
             let xhtml = b"<ul></ul>";
 
-            assert_eq!(parse_lists(xhtml), vec![]);
+            assert_eq!(parse_lists(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_no_lists_then_returns_empty() {
             let xhtml = b"<p>No lists here</p>";
 
-            assert_eq!(parse_lists(xhtml), vec![]);
+            assert_eq!(parse_lists(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
             let xhtml = b"\xff\xfe<ul><li>Bad</li></ul>";
 
-            assert_eq!(parse_lists(xhtml), vec![]);
+            assert_eq!(parse_lists(xhtml, &doc()), vec![]);
         }
     }
 
@@ -1256,7 +1330,7 @@ mod tests {
   <tr><td>Bob</td><td>25</td></tr>
 </table>";
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1286,7 +1360,7 @@ mod tests {
   <tbody><tr><td>Value</td></tr></tbody>
 </table>";
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1301,7 +1375,7 @@ mod tests {
         fn when_table_has_no_header_row_then_returns_empty_headers() {
             let xhtml = b"<table><tr><td>A</td><td>B</td></tr></table>";
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1319,7 +1393,7 @@ mod tests {
         fn when_cell_has_inline_markup_then_returns_structured_inline() {
             let xhtml = br#"<table><tr><td>See <a href="x.xhtml">link</a></td></tr></table>"#;
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1328,7 +1402,7 @@ mod tests {
                     vec![vec![vec![
                         Inline::Text("See ".to_string()),
                         Inline::Link {
-                            href: "x.xhtml".to_string(),
+                            target: link_target("x.xhtml"),
                             content: vec![Inline::Text("link".to_string())],
                         },
                     ]]]
@@ -1340,7 +1414,7 @@ mod tests {
         fn when_table_has_attributes_then_still_parsed() {
             let xhtml = br#"<table class="data"><tr><td>Cell</td></tr></table>"#;
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1356,7 +1430,7 @@ mod tests {
             let xhtml =
                 b"<table><tr><td>A</td></tr></table><p>gap</p><table><tr><td>B</td></tr></table>";
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1377,7 +1451,7 @@ mod tests {
         fn when_header_row_appears_after_data_row_then_treated_as_data_row() {
             let xhtml = b"<table><tr><td>A</td></tr><tr><th>H</th></tr></table>";
 
-            let blocks = parse_tables(xhtml);
+            let blocks = parse_tables(xhtml, &doc());
 
             assert_eq!(
                 blocks,
@@ -1395,21 +1469,21 @@ mod tests {
         fn when_table_is_empty_then_returns_empty() {
             let xhtml = b"<table></table>";
 
-            assert_eq!(parse_tables(xhtml), vec![]);
+            assert_eq!(parse_tables(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_no_tables_then_returns_empty() {
             let xhtml = b"<p>No tables here</p>";
 
-            assert_eq!(parse_tables(xhtml), vec![]);
+            assert_eq!(parse_tables(xhtml, &doc()), vec![]);
         }
 
         #[test]
         fn when_invalid_utf8_then_returns_empty() {
             let xhtml = b"\xff\xfe<table><tr><td>Bad</td></tr></table>";
 
-            assert_eq!(parse_tables(xhtml), vec![]);
+            assert_eq!(parse_tables(xhtml, &doc()), vec![]);
         }
     }
 
@@ -1555,40 +1629,34 @@ mod tests {
 
         #[test]
         fn when_plain_text_then_returns_single_text_inline() {
-            let inlines = parse_inline("Hello world");
+            let inlines = parse_inline("Hello world", &doc());
 
             assert_eq!(inlines, vec![Inline::Text("Hello world".to_string())]);
         }
 
         #[test]
         fn when_link_then_returns_link_inline_with_href() {
-            let inlines = parse_inline(r#"<a href="https://example.com">here</a>"#);
+            let inlines = parse_inline(r#"<a href="https://example.com">here</a>"#, &doc());
 
             assert_eq!(
                 inlines,
                 vec![Inline::Link {
-                    href: "https://example.com".to_string(),
+                    target: link_target("https://example.com"),
                     content: vec![Inline::Text("here".to_string())],
                 }]
             );
         }
 
         #[test]
-        fn when_link_has_no_href_then_returns_empty_href() {
-            let inlines = parse_inline("<a>here</a>");
+        fn when_anchor_element_has_neither_href_nor_id_then_keeps_content() {
+            let inlines = parse_inline("<a>here</a>", &doc());
 
-            assert_eq!(
-                inlines,
-                vec![Inline::Link {
-                    href: String::new(),
-                    content: vec![Inline::Text("here".to_string())],
-                }]
-            );
+            assert_eq!(inlines, vec![Inline::Text("here".to_string())]);
         }
 
         #[test]
         fn when_emphasis_then_returns_emphasis_inline() {
-            let inlines = parse_inline("<em>World</em>");
+            let inlines = parse_inline("<em>World</em>", &doc());
 
             assert_eq!(
                 inlines,
@@ -1600,7 +1668,7 @@ mod tests {
 
         #[test]
         fn when_strong_then_returns_strong_inline() {
-            let inlines = parse_inline("<strong>World</strong>");
+            let inlines = parse_inline("<strong>World</strong>", &doc());
 
             assert_eq!(
                 inlines,
@@ -1612,7 +1680,7 @@ mod tests {
 
         #[test]
         fn when_strong_nested_in_emphasis_then_returns_nested_inline() {
-            let inlines = parse_inline("<em>very <strong>important</strong></em>");
+            let inlines = parse_inline("<em>very <strong>important</strong></em>", &doc());
 
             assert_eq!(
                 inlines,
@@ -1630,12 +1698,12 @@ mod tests {
 
         #[test]
         fn when_emphasis_nested_in_link_then_returns_nested_inline() {
-            let inlines = parse_inline(r#"<a href="x.xhtml"><em>Chapter</em></a>"#);
+            let inlines = parse_inline(r#"<a href="x.xhtml"><em>Chapter</em></a>"#, &doc());
 
             assert_eq!(
                 inlines,
                 vec![Inline::Link {
-                    href: "x.xhtml".to_string(),
+                    target: link_target("x.xhtml"),
                     content: vec![Inline::Emphasis(
                         NonEmpty::new(vec![Inline::Text("Chapter".to_string())]).unwrap()
                     )],
@@ -1645,14 +1713,14 @@ mod tests {
 
         #[test]
         fn when_unrecognized_tag_then_strips_tag_but_keeps_text() {
-            let inlines = parse_inline("Hello <span>World</span>");
+            let inlines = parse_inline("Hello <span>World</span>", &doc());
 
             assert_eq!(inlines, vec![Inline::Text("Hello World".to_string())]);
         }
 
         #[test]
         fn when_multiple_inlines_in_sequence_then_returns_all_in_order() {
-            let inlines = parse_inline("A <em>B</em> C <strong>D</strong> E");
+            let inlines = parse_inline("A <em>B</em> C <strong>D</strong> E", &doc());
 
             assert_eq!(
                 inlines,
@@ -1668,19 +1736,19 @@ mod tests {
 
         #[test]
         fn when_empty_string_then_returns_empty() {
-            assert_eq!(parse_inline(""), vec![]);
+            assert_eq!(parse_inline("", &doc()), vec![]);
         }
 
         #[test]
         fn when_unclosed_recognized_tag_then_ignored() {
-            let inlines = parse_inline("Hello <em>World");
+            let inlines = parse_inline("Hello <em>World", &doc());
 
             assert_eq!(inlines, vec![Inline::Text("Hello World".to_string())]);
         }
 
         #[test]
         fn when_surrounding_whitespace_then_trims_outer_edges_only() {
-            let inlines = parse_inline("\n  Hello <em>World</em>  \n");
+            let inlines = parse_inline("\n  Hello <em>World</em>  \n", &doc());
 
             assert_eq!(
                 inlines,
@@ -1695,7 +1763,7 @@ mod tests {
 
         #[test]
         fn when_trailing_whitespace_becomes_empty_after_trim_then_removed() {
-            let inlines = parse_inline("<em>World</em>  \n");
+            let inlines = parse_inline("<em>World</em>  \n", &doc());
 
             assert_eq!(
                 inlines,

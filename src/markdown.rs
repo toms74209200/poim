@@ -1,4 +1,6 @@
-use crate::ir::{Block, Cell, HeadingLevel, Inline, ListItem, ListKind, ResourcePath, Table};
+use crate::ir::{
+    Anchor, Block, Cell, HeadingLevel, Inline, LinkTarget, ListItem, ListKind, ResourcePath, Table,
+};
 
 pub fn emit(blocks: &[Block]) -> String {
     blocks
@@ -9,6 +11,7 @@ pub fn emit(blocks: &[Block]) -> String {
             Block::List { kind, items } => emit_list(*kind, items),
             Block::Table(table) => emit_table(table),
             Block::Image { src, alt } => emit_image(src, alt),
+            Block::Anchor(anchor) => emit_anchor(anchor),
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -66,6 +69,17 @@ fn emit_cell(cell: &Cell) -> String {
     emit_inline(cell.content()).replace('|', "\\|")
 }
 
+pub fn emit_anchor(anchor: &Anchor) -> String {
+    format!("<a id=\"{}\"></a>", anchor.as_str())
+}
+
+fn emit_link_target(target: &LinkTarget) -> String {
+    match target {
+        LinkTarget::External(url) => url.clone(),
+        LinkTarget::Internal(anchor) => format!("#{}", anchor.as_str()),
+    }
+}
+
 pub fn emit_image(src: &ResourcePath, alt: &str) -> String {
     format!("![{alt}]({})", src.as_str())
 }
@@ -89,9 +103,14 @@ pub fn emit_inline(content: &[Inline]) -> String {
             Inline::Text(text) => result.push_str(text),
             Inline::Emphasis(inner) => result.push_str(&format!("*{}*", emit_inline(inner))),
             Inline::Strong(inner) => result.push_str(&format!("**{}**", emit_inline(inner))),
-            Inline::Link { href, content } => {
-                result.push_str(&format!("[{}]({href})", emit_inline(content)));
+            Inline::Link { target, content } => {
+                result.push_str(&format!(
+                    "[{}]({})",
+                    emit_inline(content),
+                    emit_link_target(target)
+                ));
             }
+            Inline::Anchor(anchor) => result.push_str(&emit_anchor(anchor)),
         }
     }
     result
@@ -101,6 +120,18 @@ pub fn emit_inline(content: &[Inline]) -> String {
 mod tests {
     use super::*;
     use crate::ir::NonEmpty;
+
+    fn doc() -> ResourcePath {
+        ResourcePath::resolve("", "doc.xhtml")
+    }
+
+    fn link_target(href: &str) -> LinkTarget {
+        match href.strip_prefix('#') {
+            Some(fragment) => LinkTarget::Internal(Anchor::new(&doc(), Some(fragment))),
+            None if href.contains("://") => LinkTarget::External(href.to_string()),
+            None => LinkTarget::Internal(Anchor::new(&ResourcePath::resolve("", href), None)),
+        }
+    }
 
     fn table(headers: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>>) -> Table {
         Table::new(
@@ -232,7 +263,7 @@ mod tests {
         #[test]
         fn when_content_has_link_then_emits_link_syntax() {
             let content = vec![Inline::Link {
-                href: "https://example.com".to_string(),
+                target: link_target("https://example.com"),
                 content: vec![Inline::Text("here".to_string())],
             }];
 
@@ -293,7 +324,7 @@ mod tests {
             let content = vec![
                 Inline::Text("Visit ".to_string()),
                 Inline::Link {
-                    href: "https://example.com".to_string(),
+                    target: link_target("https://example.com"),
                     content: vec![Inline::Text("here".to_string())],
                 },
             ];
@@ -362,7 +393,7 @@ mod tests {
                 ListItem::new(vec![
                     Inline::Text("See ".to_string()),
                     Inline::Link {
-                        href: "chapter2.xhtml".to_string(),
+                        target: link_target("chapter2.xhtml"),
                         content: vec![Inline::Text("Chapter 2".to_string())],
                     },
                 ])
@@ -371,7 +402,7 @@ mod tests {
 
             assert_eq!(
                 emit_list(ListKind::Ordered, &items),
-                "1. See [Chapter 2](chapter2.xhtml)"
+                "1. See [Chapter 2](#chapter2-xhtml)"
             );
         }
 
@@ -460,13 +491,13 @@ mod tests {
         fn when_cell_has_inline_markup_then_emits_markup() {
             let headers = vec![cell("Link")];
             let rows = vec![vec![vec![Inline::Link {
-                href: "x.xhtml".to_string(),
+                target: link_target("x.xhtml"),
                 content: vec![Inline::Text("here".to_string())],
             }]]];
 
             assert_eq!(
                 emit_table(&table(headers, rows)),
-                "| Link |\n| --- |\n| [here](x.xhtml) |"
+                "| Link |\n| --- |\n| [here](#x-xhtml) |"
             );
         }
 
@@ -628,7 +659,7 @@ mod tests {
         #[test]
         fn when_link_then_emits_bracket_paren_syntax() {
             let content = vec![Inline::Link {
-                href: "https://example.com".to_string(),
+                target: link_target("https://example.com"),
                 content: vec![Inline::Text("here".to_string())],
             }];
 
@@ -653,13 +684,13 @@ mod tests {
         #[test]
         fn when_emphasis_nested_in_link_then_nests_markers() {
             let content = vec![Inline::Link {
-                href: "x.xhtml".to_string(),
+                target: link_target("x.xhtml"),
                 content: vec![Inline::Emphasis(
                     NonEmpty::new(vec![Inline::Text("Chapter".to_string())]).unwrap(),
                 )],
             }];
 
-            assert_eq!(emit_inline(&content), "[*Chapter*](x.xhtml)");
+            assert_eq!(emit_inline(&content), "[*Chapter*](#x-xhtml)");
         }
 
         #[test]
@@ -677,11 +708,11 @@ mod tests {
         #[test]
         fn when_link_content_is_empty_then_still_emits_href() {
             let content = vec![Inline::Link {
-                href: "cover.jpg".to_string(),
+                target: link_target("cover.jpg"),
                 content: vec![],
             }];
 
-            assert_eq!(emit_inline(&content), "[](cover.jpg)");
+            assert_eq!(emit_inline(&content), "[](#cover-jpg)");
         }
 
         #[test]

@@ -1,5 +1,5 @@
 use crate::epub::{self, EpubError};
-use crate::ir::ResourcePath;
+use crate::ir::{Anchor, Block, ResourcePath};
 use crate::markdown;
 use crate::xhtml;
 use crate::zip;
@@ -13,8 +13,7 @@ pub struct ExtractedImage {
 pub fn epub_to_markdown(data: &[u8]) -> Result<String, EpubError> {
     let rendered: Vec<String> = read_spine_documents(data)?
         .iter()
-        .map(|(path, content)| markdown::emit(&xhtml::parse_blocks(content, path.parent())))
-        .filter(|rendered| !rendered.is_empty())
+        .map(|(path, content)| markdown::emit(&document_blocks(path, content)))
         .collect();
 
     Ok(rendered.join("\n\n"))
@@ -24,7 +23,7 @@ pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
     let mut images: Vec<ExtractedImage> = Vec::new();
 
     for (document_path, content) in read_spine_documents(data)? {
-        let blocks = xhtml::parse_blocks(&content, document_path.parent());
+        let blocks = xhtml::parse_blocks(&content, &document_path);
         for path in markdown::collect_image_sources(&blocks) {
             if images.iter().any(|image| image.path == path) {
                 continue;
@@ -36,6 +35,12 @@ pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
     }
 
     Ok(images)
+}
+
+fn document_blocks(path: &ResourcePath, content: &[u8]) -> Vec<Block> {
+    let mut blocks = vec![Block::Anchor(Anchor::new(path, None))];
+    blocks.extend(xhtml::parse_blocks(content, path));
+    blocks
 }
 
 fn read_spine_documents(data: &[u8]) -> Result<Vec<(ResourcePath, Vec<u8>)>, EpubError> {
@@ -153,6 +158,109 @@ mod tests {
         use super::*;
 
         #[test]
+        fn when_link_points_to_another_chapter_then_becomes_anchor_reference() {
+            let opf = br#"<package>
+  <manifest>
+    <item id="ch1" href="Text/chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="Text/chapter2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>"#;
+            let ch1 = br#"<p>Go to <a href="chapter2.xhtml">next</a>.</p>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/Text/chapter1.xhtml", ch1)
+                .add("OEBPS/Text/chapter2.xhtml", b"<h1>Two</h1>")
+                .build();
+
+            let markdown = epub_to_markdown(&epub).unwrap();
+
+            assert!(
+                markdown.contains("[next](#OEBPS-Text-chapter2-xhtml)"),
+                "{markdown}"
+            );
+            assert!(
+                markdown.contains("<a id=\"OEBPS-Text-chapter2-xhtml\"></a>"),
+                "{markdown}"
+            );
+        }
+
+        #[test]
+        fn when_link_targets_an_element_then_resolves_to_that_anchor() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let ch1 = br##"<p>See <a href="#fn1">note</a>.</p><p id="fn1">The note.</p>"##;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/chapter1.xhtml", ch1)
+                .build();
+
+            let markdown = epub_to_markdown(&epub).unwrap();
+
+            assert!(
+                markdown.contains("[note](#OEBPS-chapter1-xhtml--fn1)"),
+                "{markdown}"
+            );
+            assert!(
+                markdown.contains("<a id=\"OEBPS-chapter1-xhtml--fn1\"></a>"),
+                "{markdown}"
+            );
+        }
+
+        #[test]
+        fn when_link_is_external_then_kept_as_is() {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let ch1 = br#"<p><a href="https://example.com/a?b=1">site</a></p>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/chapter1.xhtml", ch1)
+                .build();
+
+            assert!(
+                epub_to_markdown(&epub)
+                    .unwrap()
+                    .contains("[site](https://example.com/a?b=1)")
+            );
+        }
+
+        #[test]
+        fn when_same_id_appears_in_two_chapters_then_anchors_do_not_collide() {
+            let opf = br#"<package>
+  <manifest>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>"#;
+            let chapter = br#"<p id="note">Note.</p>"#;
+            let epub = ZipBuilder::new()
+                .add("META-INF/container.xml", CONTAINER)
+                .add("OEBPS/content.opf", opf)
+                .add("OEBPS/chapter1.xhtml", chapter)
+                .add("OEBPS/chapter2.xhtml", chapter)
+                .build();
+
+            let markdown = epub_to_markdown(&epub).unwrap();
+
+            assert!(
+                markdown.contains("<a id=\"OEBPS-chapter1-xhtml--note\"></a>"),
+                "{markdown}"
+            );
+            assert!(
+                markdown.contains("<a id=\"OEBPS-chapter2-xhtml--note\"></a>"),
+                "{markdown}"
+            );
+        }
+
+        #[test]
         fn when_single_chapter_then_converts_to_markdown() {
             let opf = br#"<package>
   <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
@@ -167,7 +275,10 @@ mod tests {
 
             let markdown = epub_to_markdown(&epub).unwrap();
 
-            assert_eq!(markdown, "# Chapter One\n\nHello world.");
+            assert_eq!(
+                markdown,
+                "<a id=\"OEBPS-chapter1-xhtml\"></a>\n\n# Chapter One\n\nHello world."
+            );
         }
 
         #[test]
@@ -188,7 +299,10 @@ mod tests {
 
             let markdown = epub_to_markdown(&epub).unwrap();
 
-            assert_eq!(markdown, "# Second\n\n# First");
+            assert_eq!(
+                markdown,
+                "<a id=\"OEBPS-chapter2-xhtml\"></a>\n\n# Second\n\n<a id=\"OEBPS-chapter1-xhtml\"></a>\n\n# First"
+            );
         }
 
         #[test]
@@ -214,7 +328,7 @@ mod tests {
 
             assert_eq!(
                 markdown,
-                "# Title\n\nIntro.\n\n- One\n- Two\n\nAfter list.\n\n![Figure](OEBPS/figure.png)"
+                "<a id=\"OEBPS-chapter1-xhtml\"></a>\n\n# Title\n\nIntro.\n\n- One\n- Two\n\nAfter list.\n\n![Figure](OEBPS/figure.png)"
             );
         }
 
@@ -233,7 +347,10 @@ mod tests {
                 .add("chapter1.xhtml", b"<h1>Root</h1>")
                 .build();
 
-            assert_eq!(epub_to_markdown(&epub).unwrap(), "# Root");
+            assert_eq!(
+                epub_to_markdown(&epub).unwrap(),
+                "<a id=\"chapter1-xhtml\"></a>\n\n# Root"
+            );
         }
 
         #[test]
@@ -266,7 +383,7 @@ mod tests {
         }
 
         #[test]
-        fn when_chapter_is_empty_then_omits_it() {
+        fn when_chapter_is_empty_then_keeps_only_its_anchor() {
             let opf = br#"<package>
   <manifest>
     <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
@@ -281,7 +398,10 @@ mod tests {
                 .add("OEBPS/chapter2.xhtml", b"<h1>Only</h1>")
                 .build();
 
-            assert_eq!(epub_to_markdown(&epub).unwrap(), "# Only");
+            assert_eq!(
+                epub_to_markdown(&epub).unwrap(),
+                "<a id=\"OEBPS-chapter1-xhtml\"></a>\n\n<a id=\"OEBPS-chapter2-xhtml\"></a>\n\n# Only"
+            );
         }
     }
 
