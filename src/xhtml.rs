@@ -1,6 +1,6 @@
 use crate::ir::{
     Anchor, Block, Cell, HeadingLevel, Inline, LinkTarget, ListItem, ListKind, NonEmpty,
-    ResourcePath, Table,
+    ResourcePath, Table, Text,
 };
 
 enum BlockKind {
@@ -496,8 +496,8 @@ pub fn parse_inline(xml: &str, document: &ResourcePath) -> Vec<Inline> {
                         let close_tag = format!("</{tag}>");
                         match xml[content_start..].find(&close_tag) {
                             Some(close_rel) => {
-                                if !text_buf.is_empty() {
-                                    inlines.push(Inline::Text(core::mem::take(&mut text_buf)));
+                                if let Some(text) = Text::new(&core::mem::take(&mut text_buf)) {
+                                    inlines.push(Inline::Text(text));
                                 }
                                 let content_end = content_start + close_rel;
                                 let inner =
@@ -532,22 +532,31 @@ pub fn parse_inline(xml: &str, document: &ResourcePath) -> Vec<Inline> {
         }
     }
 
-    if !text_buf.is_empty() {
-        inlines.push(Inline::Text(text_buf));
+    if let Some(text) = Text::new(&text_buf) {
+        inlines.push(Inline::Text(text));
     }
 
     trim_edges(inlines)
 }
 
-fn trim_edges(mut inlines: Vec<Inline>) -> Vec<Inline> {
-    if let Some(Inline::Text(first)) = inlines.first_mut() {
-        *first = first.trim_start().to_string();
-    }
-    if let Some(Inline::Text(last)) = inlines.last_mut() {
-        *last = last.trim_end().to_string();
-    }
-    inlines.retain(|inline| !matches!(inline, Inline::Text(text) if text.is_empty()));
+fn trim_edges(inlines: Vec<Inline>) -> Vec<Inline> {
+    let last_index = inlines.len().saturating_sub(1);
     inlines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, inline)| match inline {
+            Inline::Text(text) => {
+                let text = if index == 0 { text.trim_start()? } else { text };
+                let text = if index == last_index {
+                    text.trim_end()?
+                } else {
+                    text
+                };
+                Some(Inline::Text(text))
+            }
+            other => Some(other),
+        })
+        .collect()
 }
 
 fn match_recognized_open_tag(xml: &str, lt: usize) -> Option<(&'static str, &str, usize)> {
@@ -696,17 +705,21 @@ mod tests {
                 vec![
                     Block::Heading {
                         level: HeadingLevel::new(1).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Title").unwrap())])
+                            .unwrap(),
                     },
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("Intro.".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Intro.").unwrap())])
+                            .unwrap(),
                     },
                     Block::Heading {
                         level: HeadingLevel::new(2).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("Sub".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Sub").unwrap())])
+                            .unwrap(),
                     },
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("Body.".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Body.").unwrap())])
+                            .unwrap(),
                     },
                 ]
             );
@@ -722,17 +735,19 @@ mod tests {
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("Before".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Before").unwrap())])
+                            .unwrap(),
                     },
                     Block::List {
                         kind: ListKind::Unordered,
                         items: NonEmpty::new(vec![
-                            ListItem::new(vec![Inline::Text("A".to_string())]).unwrap()
+                            ListItem::new(vec![Inline::Text(Text::new("A").unwrap())]).unwrap()
                         ])
                         .unwrap(),
                     },
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("After".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("After").unwrap())])
+                            .unwrap(),
                     },
                 ]
             );
@@ -749,7 +764,7 @@ mod tests {
                 vec![Block::List {
                     kind: ListKind::Unordered,
                     items: NonEmpty::new(vec![
-                        ListItem::new(vec![Inline::Text("Nested".to_string())]).unwrap()
+                        ListItem::new(vec![Inline::Text(Text::new("Nested").unwrap())]).unwrap()
                     ])
                     .unwrap(),
                 }]
@@ -781,7 +796,8 @@ mod tests {
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("Caption".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Caption").unwrap())])
+                            .unwrap(),
                     },
                     Block::Image {
                         src: ResourcePath::resolve("", "a.png"),
@@ -800,7 +816,7 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("Real".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Real").unwrap())]).unwrap(),
                 }]
             );
         }
@@ -815,11 +831,16 @@ mod tests {
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("Before".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Before").unwrap())])
+                            .unwrap(),
                     },
-                    Block::Table(table(vec![vec![Inline::Text("H".to_string())]], vec![])),
+                    Block::Table(table(
+                        vec![vec![Inline::Text(Text::new("H").unwrap())]],
+                        vec![]
+                    )),
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("After".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("After").unwrap())])
+                            .unwrap(),
                     },
                 ]
             );
@@ -837,14 +858,14 @@ mod tests {
                     Block::List {
                         kind: ListKind::Ordered,
                         items: NonEmpty::new(vec![
-                            ListItem::new(vec![Inline::Text("A".to_string())]).unwrap()
+                            ListItem::new(vec![Inline::Text(Text::new("A").unwrap())]).unwrap()
                         ])
                         .unwrap(),
                     },
                     Block::List {
                         kind: ListKind::Unordered,
                         items: NonEmpty::new(vec![
-                            ListItem::new(vec![Inline::Text("B".to_string())]).unwrap()
+                            ListItem::new(vec![Inline::Text(Text::new("B").unwrap())]).unwrap()
                         ])
                         .unwrap(),
                     },
@@ -862,10 +883,10 @@ mod tests {
                 blocks,
                 vec![Block::Paragraph {
                     content: NonEmpty::new(vec![
-                        Inline::Text("See ".to_string()),
+                        Inline::Text(Text::new("See ").unwrap()),
                         Inline::Link {
                             target: link_target("x.xhtml"),
-                            content: vec![Inline::Text("here".to_string())],
+                            content: vec![Inline::Text(Text::new("here").unwrap())],
                         },
                     ])
                     .unwrap(),
@@ -883,7 +904,8 @@ mod tests {
                 blocks,
                 vec![Block::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Title").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -912,7 +934,8 @@ mod tests {
                 blocks,
                 vec![Block::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Chapter One".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Chapter One").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -928,11 +951,13 @@ mod tests {
                 vec![
                     Block::Heading {
                         level: HeadingLevel::new(1).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Title").unwrap())])
+                            .unwrap(),
                     },
                     Block::Heading {
                         level: HeadingLevel::new(2).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("Subtitle".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Subtitle").unwrap())])
+                            .unwrap(),
                     },
                 ]
             );
@@ -948,7 +973,8 @@ mod tests {
                 blocks,
                 vec![Block::Heading {
                     level: HeadingLevel::new(2).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Section".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Section").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -963,7 +989,8 @@ mod tests {
                 blocks,
                 vec![Block::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Hello World".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Hello World").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -979,9 +1006,9 @@ mod tests {
                 vec![Block::Heading {
                     level: HeadingLevel::new(1).unwrap(),
                     content: NonEmpty::new(vec![
-                        Inline::Text("Hello ".to_string()),
+                        Inline::Text(Text::new("Hello ").unwrap()),
                         Inline::Emphasis(
-                            NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                            NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap()
                         ),
                     ])
                     .unwrap(),
@@ -999,7 +1026,8 @@ mod tests {
                 blocks,
                 vec![Block::Heading {
                     level: HeadingLevel::new(3).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Padded".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Padded").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -1036,27 +1064,33 @@ mod tests {
                 vec![
                     Block::Heading {
                         level: HeadingLevel::new(1).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("A".to_string())]).unwrap()
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("A").unwrap())])
+                            .unwrap()
                     },
                     Block::Heading {
                         level: HeadingLevel::new(2).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("B".to_string())]).unwrap()
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("B").unwrap())])
+                            .unwrap()
                     },
                     Block::Heading {
                         level: HeadingLevel::new(3).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("C".to_string())]).unwrap()
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("C").unwrap())])
+                            .unwrap()
                     },
                     Block::Heading {
                         level: HeadingLevel::new(4).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("D".to_string())]).unwrap()
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("D").unwrap())])
+                            .unwrap()
                     },
                     Block::Heading {
                         level: HeadingLevel::new(5).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("E".to_string())]).unwrap()
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("E").unwrap())])
+                            .unwrap()
                     },
                     Block::Heading {
                         level: HeadingLevel::new(6).unwrap(),
-                        content: NonEmpty::new(vec![Inline::Text("F".to_string())]).unwrap()
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("F").unwrap())])
+                            .unwrap()
                     },
                 ]
             );
@@ -1075,7 +1109,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("Hello world.".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Hello world.").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -1090,10 +1125,12 @@ mod tests {
                 blocks,
                 vec![
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("First.".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("First.").unwrap())])
+                            .unwrap(),
                     },
                     Block::Paragraph {
-                        content: NonEmpty::new(vec![Inline::Text("Second.".to_string())]).unwrap(),
+                        content: NonEmpty::new(vec![Inline::Text(Text::new("Second.").unwrap())])
+                            .unwrap(),
                     },
                 ]
             );
@@ -1108,7 +1145,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("Welcome.".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Welcome.").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -1122,7 +1160,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("Hello World.".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Hello World.").unwrap())])
+                        .unwrap(),
                 }]
             );
         }
@@ -1137,16 +1176,17 @@ mod tests {
                 blocks,
                 vec![Block::Paragraph {
                     content: NonEmpty::new(vec![
-                        Inline::Text("Visit ".to_string()),
+                        Inline::Text(Text::new("Visit ").unwrap()),
                         Inline::Link {
                             target: link_target("https://example.com"),
-                            content: vec![Inline::Text("here".to_string())],
+                            content: vec![Inline::Text(Text::new("here").unwrap())],
                         },
-                        Inline::Text(" for ".to_string()),
+                        Inline::Text(Text::new(" for ").unwrap()),
                         Inline::Strong(
-                            NonEmpty::new(vec![Inline::Text("details".to_string())]).unwrap()
+                            NonEmpty::new(vec![Inline::Text(Text::new("details").unwrap())])
+                                .unwrap()
                         ),
-                        Inline::Text(".".to_string()),
+                        Inline::Text(Text::new(".").unwrap()),
                     ])
                     .unwrap(),
                 }]
@@ -1182,8 +1222,8 @@ mod tests {
                 vec![Block::List {
                     kind: ListKind::Unordered,
                     items: NonEmpty::new(vec![
-                        ListItem::new(vec![Inline::Text("First".to_string())]).unwrap(),
-                        ListItem::new(vec![Inline::Text("Second".to_string())]).unwrap(),
+                        ListItem::new(vec![Inline::Text(Text::new("First").unwrap())]).unwrap(),
+                        ListItem::new(vec![Inline::Text(Text::new("Second").unwrap())]).unwrap(),
                     ])
                     .unwrap(),
                 }]
@@ -1201,8 +1241,8 @@ mod tests {
                 vec![Block::List {
                     kind: ListKind::Ordered,
                     items: NonEmpty::new(vec![
-                        ListItem::new(vec![Inline::Text("First".to_string())]).unwrap(),
-                        ListItem::new(vec![Inline::Text("Second".to_string())]).unwrap(),
+                        ListItem::new(vec![Inline::Text(Text::new("First").unwrap())]).unwrap(),
+                        ListItem::new(vec![Inline::Text(Text::new("Second").unwrap())]).unwrap(),
                     ])
                     .unwrap(),
                 }]
@@ -1221,14 +1261,14 @@ mod tests {
                     Block::List {
                         kind: ListKind::Unordered,
                         items: NonEmpty::new(vec![
-                            ListItem::new(vec![Inline::Text("A".to_string())]).unwrap()
+                            ListItem::new(vec![Inline::Text(Text::new("A").unwrap())]).unwrap()
                         ])
                         .unwrap(),
                     },
                     Block::List {
                         kind: ListKind::Ordered,
                         items: NonEmpty::new(vec![
-                            ListItem::new(vec![Inline::Text("B".to_string())]).unwrap()
+                            ListItem::new(vec![Inline::Text(Text::new("B").unwrap())]).unwrap()
                         ])
                         .unwrap(),
                     },
@@ -1247,7 +1287,8 @@ mod tests {
                 vec![Block::List {
                     kind: ListKind::Unordered,
                     items: NonEmpty::new(vec![
-                        ListItem::new(vec![Inline::Text("Hello World".to_string())]).unwrap()
+                        ListItem::new(vec![Inline::Text(Text::new("Hello World").unwrap())])
+                            .unwrap()
                     ])
                     .unwrap(),
                 }]
@@ -1266,10 +1307,10 @@ mod tests {
                     kind: ListKind::Unordered,
                     items: NonEmpty::new(vec![
                         ListItem::new(vec![
-                            Inline::Text("See ".to_string()),
+                            Inline::Text(Text::new("See ").unwrap()),
                             Inline::Link {
                                 target: link_target("chapter2.xhtml"),
-                                content: vec![Inline::Text("Chapter 2".to_string())],
+                                content: vec![Inline::Text(Text::new("Chapter 2").unwrap())],
                             },
                         ])
                         .unwrap()
@@ -1290,7 +1331,7 @@ mod tests {
                 vec![Block::List {
                     kind: ListKind::Unordered,
                     items: NonEmpty::new(vec![
-                        ListItem::new(vec![Inline::Text("Entry".to_string())]).unwrap()
+                        ListItem::new(vec![Inline::Text(Text::new("Entry").unwrap())]).unwrap()
                     ])
                     .unwrap(),
                 }]
@@ -1336,17 +1377,17 @@ mod tests {
                 blocks,
                 vec![Block::Table(table(
                     vec![
-                        vec![Inline::Text("Name".to_string())],
-                        vec![Inline::Text("Age".to_string())],
+                        vec![Inline::Text(Text::new("Name").unwrap())],
+                        vec![Inline::Text(Text::new("Age").unwrap())],
                     ],
                     vec![
                         vec![
-                            vec![Inline::Text("Alice".to_string())],
-                            vec![Inline::Text("30".to_string())],
+                            vec![Inline::Text(Text::new("Alice").unwrap())],
+                            vec![Inline::Text(Text::new("30").unwrap())],
                         ],
                         vec![
-                            vec![Inline::Text("Bob".to_string())],
-                            vec![Inline::Text("25".to_string())],
+                            vec![Inline::Text(Text::new("Bob").unwrap())],
+                            vec![Inline::Text(Text::new("25").unwrap())],
                         ],
                     ]
                 ))]
@@ -1365,8 +1406,8 @@ mod tests {
             assert_eq!(
                 blocks,
                 vec![Block::Table(table(
-                    vec![vec![Inline::Text("Key".to_string())]],
-                    vec![vec![vec![Inline::Text("Value".to_string())]]]
+                    vec![vec![Inline::Text(Text::new("Key").unwrap())]],
+                    vec![vec![vec![Inline::Text(Text::new("Value").unwrap())]]]
                 ))]
             );
         }
@@ -1382,8 +1423,8 @@ mod tests {
                 vec![Block::Table(table(
                     vec![],
                     vec![vec![
-                        vec![Inline::Text("A".to_string())],
-                        vec![Inline::Text("B".to_string())],
+                        vec![Inline::Text(Text::new("A").unwrap())],
+                        vec![Inline::Text(Text::new("B").unwrap())],
                     ]]
                 ))]
             );
@@ -1400,10 +1441,10 @@ mod tests {
                 vec![Block::Table(table(
                     vec![],
                     vec![vec![vec![
-                        Inline::Text("See ".to_string()),
+                        Inline::Text(Text::new("See ").unwrap()),
                         Inline::Link {
                             target: link_target("x.xhtml"),
-                            content: vec![Inline::Text("link".to_string())],
+                            content: vec![Inline::Text(Text::new("link").unwrap())],
                         },
                     ]]]
                 ))]
@@ -1420,7 +1461,7 @@ mod tests {
                 blocks,
                 vec![Block::Table(table(
                     vec![],
-                    vec![vec![vec![Inline::Text("Cell".to_string())]]]
+                    vec![vec![vec![Inline::Text(Text::new("Cell").unwrap())]]]
                 ))]
             );
         }
@@ -1437,11 +1478,11 @@ mod tests {
                 vec![
                     Block::Table(table(
                         vec![],
-                        vec![vec![vec![Inline::Text("A".to_string())]]]
+                        vec![vec![vec![Inline::Text(Text::new("A").unwrap())]]]
                     )),
                     Block::Table(table(
                         vec![],
-                        vec![vec![vec![Inline::Text("B".to_string())]]]
+                        vec![vec![vec![Inline::Text(Text::new("B").unwrap())]]]
                     )),
                 ]
             );
@@ -1458,8 +1499,8 @@ mod tests {
                 vec![Block::Table(table(
                     vec![],
                     vec![
-                        vec![vec![Inline::Text("A".to_string())]],
-                        vec![vec![Inline::Text("H".to_string())]],
+                        vec![vec![Inline::Text(Text::new("A").unwrap())]],
+                        vec![vec![Inline::Text(Text::new("H").unwrap())]],
                     ]
                 ))]
             );
@@ -1628,10 +1669,61 @@ mod tests {
         use super::*;
 
         #[test]
+        fn when_text_spans_lines_then_collapses_to_single_space() {
+            let inlines = parse_inline("ruby\r\n                markup", &doc());
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Text(Text::new("ruby markup").unwrap())]
+            );
+        }
+
+        #[test]
+        fn when_inline_element_spans_lines_then_collapses_inside_it() {
+            let inlines = parse_inline("<em>ruby\n        markup</em>", &doc());
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text(Text::new("ruby markup").unwrap())]).unwrap()
+                )]
+            );
+        }
+
+        #[test]
+        fn when_whitespace_separates_elements_then_keeps_one_space() {
+            let inlines = parse_inline("a\n  <em>b</em>\n  c", &doc());
+
+            assert_eq!(
+                inlines,
+                vec![
+                    Inline::Text(Text::new("a ").unwrap()),
+                    Inline::Emphasis(
+                        NonEmpty::new(vec![Inline::Text(Text::new("b").unwrap())]).unwrap()
+                    ),
+                    Inline::Text(Text::new(" c").unwrap()),
+                ]
+            );
+        }
+
+        #[test]
+        fn when_text_has_ideographic_space_then_preserves_it() {
+            let inlines = parse_inline("\u{3000}\u{3000}\u{3000}", &doc());
+
+            assert_eq!(
+                inlines,
+                vec![Inline::Text(Text::new("\u{3000}\u{3000}\u{3000}").unwrap())]
+            );
+        }
+
+        #[test]
         fn when_plain_text_then_returns_single_text_inline() {
             let inlines = parse_inline("Hello world", &doc());
 
-            assert_eq!(inlines, vec![Inline::Text("Hello world".to_string())]);
+            assert_eq!(
+                inlines,
+                vec![Inline::Text(Text::new("Hello world").unwrap())]
+            );
         }
 
         #[test]
@@ -1642,7 +1734,7 @@ mod tests {
                 inlines,
                 vec![Inline::Link {
                     target: link_target("https://example.com"),
-                    content: vec![Inline::Text("here".to_string())],
+                    content: vec![Inline::Text(Text::new("here").unwrap())],
                 }]
             );
         }
@@ -1651,7 +1743,7 @@ mod tests {
         fn when_anchor_element_has_neither_href_nor_id_then_keeps_content() {
             let inlines = parse_inline("<a>here</a>", &doc());
 
-            assert_eq!(inlines, vec![Inline::Text("here".to_string())]);
+            assert_eq!(inlines, vec![Inline::Text(Text::new("here").unwrap())]);
         }
 
         #[test]
@@ -1661,7 +1753,7 @@ mod tests {
             assert_eq!(
                 inlines,
                 vec![Inline::Emphasis(
-                    NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                    NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap()
                 )]
             );
         }
@@ -1673,7 +1765,7 @@ mod tests {
             assert_eq!(
                 inlines,
                 vec![Inline::Strong(
-                    NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                    NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap()
                 )]
             );
         }
@@ -1686,9 +1778,10 @@ mod tests {
                 inlines,
                 vec![Inline::Emphasis(
                     NonEmpty::new(vec![
-                        Inline::Text("very ".to_string()),
+                        Inline::Text(Text::new("very ").unwrap()),
                         Inline::Strong(
-                            NonEmpty::new(vec![Inline::Text("important".to_string())]).unwrap()
+                            NonEmpty::new(vec![Inline::Text(Text::new("important").unwrap())])
+                                .unwrap()
                         ),
                     ])
                     .unwrap()
@@ -1705,7 +1798,7 @@ mod tests {
                 vec![Inline::Link {
                     target: link_target("x.xhtml"),
                     content: vec![Inline::Emphasis(
-                        NonEmpty::new(vec![Inline::Text("Chapter".to_string())]).unwrap()
+                        NonEmpty::new(vec![Inline::Text(Text::new("Chapter").unwrap())]).unwrap()
                     )],
                 }]
             );
@@ -1715,7 +1808,10 @@ mod tests {
         fn when_unrecognized_tag_then_strips_tag_but_keeps_text() {
             let inlines = parse_inline("Hello <span>World</span>", &doc());
 
-            assert_eq!(inlines, vec![Inline::Text("Hello World".to_string())]);
+            assert_eq!(
+                inlines,
+                vec![Inline::Text(Text::new("Hello World").unwrap())]
+            );
         }
 
         #[test]
@@ -1725,11 +1821,15 @@ mod tests {
             assert_eq!(
                 inlines,
                 vec![
-                    Inline::Text("A ".to_string()),
-                    Inline::Emphasis(NonEmpty::new(vec![Inline::Text("B".to_string())]).unwrap()),
-                    Inline::Text(" C ".to_string()),
-                    Inline::Strong(NonEmpty::new(vec![Inline::Text("D".to_string())]).unwrap()),
-                    Inline::Text(" E".to_string()),
+                    Inline::Text(Text::new("A ").unwrap()),
+                    Inline::Emphasis(
+                        NonEmpty::new(vec![Inline::Text(Text::new("B").unwrap())]).unwrap()
+                    ),
+                    Inline::Text(Text::new(" C ").unwrap()),
+                    Inline::Strong(
+                        NonEmpty::new(vec![Inline::Text(Text::new("D").unwrap())]).unwrap()
+                    ),
+                    Inline::Text(Text::new(" E").unwrap()),
                 ]
             );
         }
@@ -1743,7 +1843,10 @@ mod tests {
         fn when_unclosed_recognized_tag_then_ignored() {
             let inlines = parse_inline("Hello <em>World", &doc());
 
-            assert_eq!(inlines, vec![Inline::Text("Hello World".to_string())]);
+            assert_eq!(
+                inlines,
+                vec![Inline::Text(Text::new("Hello World").unwrap())]
+            );
         }
 
         #[test]
@@ -1753,9 +1856,9 @@ mod tests {
             assert_eq!(
                 inlines,
                 vec![
-                    Inline::Text("Hello ".to_string()),
+                    Inline::Text(Text::new("Hello ").unwrap()),
                     Inline::Emphasis(
-                        NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                        NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap()
                     ),
                 ]
             );
@@ -1768,7 +1871,7 @@ mod tests {
             assert_eq!(
                 inlines,
                 vec![Inline::Emphasis(
-                    NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()
+                    NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap()
                 )]
             );
         }

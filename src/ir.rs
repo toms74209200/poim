@@ -73,6 +73,39 @@ impl ResourcePath {
     }
 }
 
+const HTML_WHITESPACE: [char; 5] = [' ', '\t', '\n', '\r', '\u{0C}'];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Text(String);
+
+impl Text {
+    pub fn new(raw: &str) -> Option<Self> {
+        let mut normalized = String::new();
+        for character in raw.chars() {
+            if HTML_WHITESPACE.contains(&character) {
+                if !normalized.ends_with(' ') {
+                    normalized.push(' ');
+                }
+            } else {
+                normalized.push(character);
+            }
+        }
+        (!normalized.is_empty()).then_some(Self(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn trim_start(&self) -> Option<Self> {
+        Self::new(self.0.trim_start_matches(HTML_WHITESPACE))
+    }
+
+    pub fn trim_end(&self) -> Option<Self> {
+        Self::new(self.0.trim_end_matches(HTML_WHITESPACE))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Anchor(String);
 
@@ -215,7 +248,7 @@ pub enum Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inline {
-    Text(String),
+    Text(Text),
     Emphasis(NonEmpty<Inline>),
     Strong(NonEmpty<Inline>),
     Link {
@@ -230,7 +263,7 @@ mod tests {
     use super::*;
 
     fn text(value: &str) -> Inline {
-        Inline::Text(value.to_string())
+        Inline::Text(Text::new(value).unwrap())
     }
 
     mod non_empty {
