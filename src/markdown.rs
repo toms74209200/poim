@@ -100,7 +100,7 @@ pub fn emit_inline(content: &[Inline]) -> String {
     let mut result = String::new();
     for inline in content {
         match inline {
-            Inline::Text(text) => result.push_str(text),
+            Inline::Text(text) => result.push_str(text.as_str()),
             Inline::Emphasis(inner) => result.push_str(&format!("*{}*", emit_inline(inner))),
             Inline::Strong(inner) => result.push_str(&format!("**{}**", emit_inline(inner))),
             Inline::Link { target, content } => {
@@ -119,7 +119,7 @@ pub fn emit_inline(content: &[Inline]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::NonEmpty;
+    use crate::ir::{NonEmpty, Text};
 
     fn doc() -> ResourcePath {
         ResourcePath::resolve("", "doc.xhtml")
@@ -155,10 +155,12 @@ mod tests {
             let blocks = vec![
                 Block::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Title").unwrap())])
+                        .unwrap(),
                 },
                 Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("Body.".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Body.").unwrap())])
+                        .unwrap(),
                 },
             ];
 
@@ -170,19 +172,22 @@ mod tests {
             let blocks = vec![
                 Block::Heading {
                     level: HeadingLevel::new(2).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("H".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("H").unwrap())]).unwrap(),
                 },
                 Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("P".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("P").unwrap())]).unwrap(),
                 },
                 Block::List {
                     kind: ListKind::Unordered,
                     items: NonEmpty::new(vec![
-                        ListItem::new(vec![Inline::Text("L".to_string())]).unwrap(),
+                        ListItem::new(vec![Inline::Text(Text::new("L").unwrap())]).unwrap(),
                     ])
                     .unwrap(),
                 },
-                Block::Table(table(vec![vec![Inline::Text("T".to_string())]], vec![])),
+                Block::Table(table(
+                    vec![vec![Inline::Text(Text::new("T").unwrap())]],
+                    vec![],
+                )),
                 Block::Image {
                     src: ResourcePath::resolve("", "a.png"),
                     alt: "A".to_string(),
@@ -206,7 +211,7 @@ mod tests {
 
         #[test]
         fn when_level_one_then_emits_single_hash() {
-            let content = vec![Inline::Text("Chapter One".to_string())];
+            let content = vec![Inline::Text(Text::new("Chapter One").unwrap())];
 
             assert_eq!(
                 emit_heading(HeadingLevel::new(1).unwrap(), &content),
@@ -216,7 +221,7 @@ mod tests {
 
         #[test]
         fn when_level_two_then_emits_two_hashes() {
-            let content = vec![Inline::Text("Section".to_string())];
+            let content = vec![Inline::Text(Text::new("Section").unwrap())];
 
             assert_eq!(
                 emit_heading(HeadingLevel::new(2).unwrap(), &content),
@@ -226,7 +231,7 @@ mod tests {
 
         #[test]
         fn when_level_six_then_emits_six_hashes() {
-            let content = vec![Inline::Text("Deep".to_string())];
+            let content = vec![Inline::Text(Text::new("Deep").unwrap())];
 
             assert_eq!(
                 emit_heading(HeadingLevel::new(6).unwrap(), &content),
@@ -237,8 +242,8 @@ mod tests {
         #[test]
         fn when_content_has_multiple_text_inlines_then_concatenates_them() {
             let content = vec![
-                Inline::Text("Hello ".to_string()),
-                Inline::Text("World".to_string()),
+                Inline::Text(Text::new("Hello ").unwrap()),
+                Inline::Text(Text::new("World").unwrap()),
             ];
 
             assert_eq!(
@@ -250,8 +255,10 @@ mod tests {
         #[test]
         fn when_content_has_emphasis_then_emits_emphasis_markers() {
             let content = vec![
-                Inline::Text("Hello ".to_string()),
-                Inline::Emphasis(NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap()),
+                Inline::Text(Text::new("Hello ").unwrap()),
+                Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap(),
+                ),
             ];
 
             assert_eq!(
@@ -264,7 +271,7 @@ mod tests {
         fn when_content_has_link_then_emits_link_syntax() {
             let content = vec![Inline::Link {
                 target: link_target("https://example.com"),
-                content: vec![Inline::Text("here".to_string())],
+                content: vec![Inline::Text(Text::new("here").unwrap())],
             }];
 
             assert_eq!(
@@ -284,7 +291,7 @@ mod tests {
 
         #[test]
         fn when_plain_text_then_emits_text_as_is() {
-            let content = vec![Inline::Text("Hello world.".to_string())];
+            let content = vec![Inline::Text(Text::new("Hello world.").unwrap())];
 
             assert_eq!(emit_paragraph(&content), "Hello world.");
         }
@@ -292,8 +299,8 @@ mod tests {
         #[test]
         fn when_content_has_multiple_text_inlines_then_concatenates_them() {
             let content = vec![
-                Inline::Text("Hello ".to_string()),
-                Inline::Text("world.".to_string()),
+                Inline::Text(Text::new("Hello ").unwrap()),
+                Inline::Text(Text::new("world.").unwrap()),
             ];
 
             assert_eq!(emit_paragraph(&content), "Hello world.");
@@ -302,9 +309,11 @@ mod tests {
         #[test]
         fn when_content_has_emphasis_then_emits_emphasis_markers() {
             let content = vec![
-                Inline::Text("Hello ".to_string()),
-                Inline::Emphasis(NonEmpty::new(vec![Inline::Text("world".to_string())]).unwrap()),
-                Inline::Text(".".to_string()),
+                Inline::Text(Text::new("Hello ").unwrap()),
+                Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text(Text::new("world").unwrap())]).unwrap(),
+                ),
+                Inline::Text(Text::new(".").unwrap()),
             ];
 
             assert_eq!(emit_paragraph(&content), "Hello *world*.");
@@ -313,7 +322,7 @@ mod tests {
         #[test]
         fn when_content_has_strong_then_emits_strong_markers() {
             let content = vec![Inline::Strong(
-                NonEmpty::new(vec![Inline::Text("important".to_string())]).unwrap(),
+                NonEmpty::new(vec![Inline::Text(Text::new("important").unwrap())]).unwrap(),
             )];
 
             assert_eq!(emit_paragraph(&content), "**important**");
@@ -322,10 +331,10 @@ mod tests {
         #[test]
         fn when_content_has_link_then_emits_link_syntax() {
             let content = vec![
-                Inline::Text("Visit ".to_string()),
+                Inline::Text(Text::new("Visit ").unwrap()),
                 Inline::Link {
                     target: link_target("https://example.com"),
-                    content: vec![Inline::Text("here".to_string())],
+                    content: vec![Inline::Text(Text::new("here").unwrap())],
                 },
             ];
 
@@ -345,7 +354,7 @@ mod tests {
         use super::*;
 
         fn item(text: &str) -> ListItem {
-            ListItem::new(vec![Inline::Text(text.to_string())]).unwrap()
+            ListItem::new(vec![Inline::Text(Text::new(text).unwrap())]).unwrap()
         }
 
         #[test]
@@ -376,9 +385,9 @@ mod tests {
         fn when_item_has_emphasis_then_emits_emphasis_markers() {
             let items = vec![
                 ListItem::new(vec![
-                    Inline::Text("Hello ".to_string()),
+                    Inline::Text(Text::new("Hello ").unwrap()),
                     Inline::Emphasis(
-                        NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap(),
+                        NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap(),
                     ),
                 ])
                 .unwrap(),
@@ -391,10 +400,10 @@ mod tests {
         fn when_item_has_link_then_emits_link_syntax() {
             let items = vec![
                 ListItem::new(vec![
-                    Inline::Text("See ".to_string()),
+                    Inline::Text(Text::new("See ").unwrap()),
                     Inline::Link {
                         target: link_target("chapter2.xhtml"),
-                        content: vec![Inline::Text("Chapter 2".to_string())],
+                        content: vec![Inline::Text(Text::new("Chapter 2").unwrap())],
                     },
                 ])
                 .unwrap(),
@@ -417,7 +426,7 @@ mod tests {
         use super::*;
 
         fn cell(text: &str) -> Vec<Inline> {
-            vec![Inline::Text(text.to_string())]
+            vec![Inline::Text(Text::new(text).unwrap())]
         }
 
         #[test]
@@ -492,7 +501,7 @@ mod tests {
             let headers = vec![cell("Link")];
             let rows = vec![vec![vec![Inline::Link {
                 target: link_target("x.xhtml"),
-                content: vec![Inline::Text("here".to_string())],
+                content: vec![Inline::Text(Text::new("here").unwrap())],
             }]]];
 
             assert_eq!(
@@ -595,12 +604,13 @@ mod tests {
         fn when_non_image_blocks_present_then_ignores_them() {
             let blocks = vec![
                 Block::Paragraph {
-                    content: NonEmpty::new(vec![Inline::Text("text".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("text").unwrap())]).unwrap(),
                 },
                 image("a.png"),
                 Block::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    content: NonEmpty::new(vec![Inline::Text("Title".to_string())]).unwrap(),
+                    content: NonEmpty::new(vec![Inline::Text(Text::new("Title").unwrap())])
+                        .unwrap(),
                 },
             ];
 
@@ -616,7 +626,7 @@ mod tests {
         #[test]
         fn when_no_images_then_returns_empty() {
             let blocks = vec![Block::Paragraph {
-                content: NonEmpty::new(vec![Inline::Text("text".to_string())]).unwrap(),
+                content: NonEmpty::new(vec![Inline::Text(Text::new("text").unwrap())]).unwrap(),
             }];
 
             assert_eq!(collect_image_sources(&blocks), Vec::<ResourcePath>::new());
@@ -633,7 +643,7 @@ mod tests {
 
         #[test]
         fn when_plain_text_then_emits_text_as_is() {
-            let content = vec![Inline::Text("Hello".to_string())];
+            let content = vec![Inline::Text(Text::new("Hello").unwrap())];
 
             assert_eq!(emit_inline(&content), "Hello");
         }
@@ -641,7 +651,7 @@ mod tests {
         #[test]
         fn when_emphasis_then_wraps_in_single_asterisks() {
             let content = vec![Inline::Emphasis(
-                NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap(),
+                NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap(),
             )];
 
             assert_eq!(emit_inline(&content), "*World*");
@@ -650,7 +660,7 @@ mod tests {
         #[test]
         fn when_strong_then_wraps_in_double_asterisks() {
             let content = vec![Inline::Strong(
-                NonEmpty::new(vec![Inline::Text("World".to_string())]).unwrap(),
+                NonEmpty::new(vec![Inline::Text(Text::new("World").unwrap())]).unwrap(),
             )];
 
             assert_eq!(emit_inline(&content), "**World**");
@@ -660,7 +670,7 @@ mod tests {
         fn when_link_then_emits_bracket_paren_syntax() {
             let content = vec![Inline::Link {
                 target: link_target("https://example.com"),
-                content: vec![Inline::Text("here".to_string())],
+                content: vec![Inline::Text(Text::new("here").unwrap())],
             }];
 
             assert_eq!(emit_inline(&content), "[here](https://example.com)");
@@ -670,9 +680,9 @@ mod tests {
         fn when_strong_nested_in_emphasis_then_nests_markers() {
             let content = vec![Inline::Emphasis(
                 NonEmpty::new(vec![
-                    Inline::Text("very ".to_string()),
+                    Inline::Text(Text::new("very ").unwrap()),
                     Inline::Strong(
-                        NonEmpty::new(vec![Inline::Text("important".to_string())]).unwrap(),
+                        NonEmpty::new(vec![Inline::Text(Text::new("important").unwrap())]).unwrap(),
                     ),
                 ])
                 .unwrap(),
@@ -686,7 +696,7 @@ mod tests {
             let content = vec![Inline::Link {
                 target: link_target("x.xhtml"),
                 content: vec![Inline::Emphasis(
-                    NonEmpty::new(vec![Inline::Text("Chapter".to_string())]).unwrap(),
+                    NonEmpty::new(vec![Inline::Text(Text::new("Chapter").unwrap())]).unwrap(),
                 )],
             }];
 
@@ -696,10 +706,12 @@ mod tests {
         #[test]
         fn when_multiple_inlines_in_sequence_then_emits_all_in_order() {
             let content = vec![
-                Inline::Text("A ".to_string()),
-                Inline::Emphasis(NonEmpty::new(vec![Inline::Text("B".to_string())]).unwrap()),
-                Inline::Text(" C ".to_string()),
-                Inline::Strong(NonEmpty::new(vec![Inline::Text("D".to_string())]).unwrap()),
+                Inline::Text(Text::new("A ").unwrap()),
+                Inline::Emphasis(
+                    NonEmpty::new(vec![Inline::Text(Text::new("B").unwrap())]).unwrap(),
+                ),
+                Inline::Text(Text::new(" C ").unwrap()),
+                Inline::Strong(NonEmpty::new(vec![Inline::Text(Text::new("D").unwrap())]).unwrap()),
             ];
 
             assert_eq!(emit_inline(&content), "A *B* C **D**");
