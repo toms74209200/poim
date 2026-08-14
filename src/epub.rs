@@ -9,6 +9,20 @@ pub enum EpubError {
     ZipError(crate::zip::ZipError),
 }
 
+impl core::fmt::Display for EpubError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            EpubError::ContainerNotFound => write!(f, "META-INF/container.xml not found"),
+            EpubError::RootfileNotFound => write!(f, "rootfile not found in container.xml"),
+            EpubError::SpineNotFound => write!(f, "spine not found in package document"),
+            EpubError::ManifestItemNotFound => {
+                write!(f, "spine references a missing manifest item")
+            }
+            EpubError::ZipError(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 pub fn find_opf_path(container_xml: &[u8]) -> Result<String, EpubError> {
     let xml = core::str::from_utf8(container_xml).map_err(|_| EpubError::RootfileNotFound)?;
 

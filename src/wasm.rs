@@ -25,10 +25,93 @@ pub unsafe fn deallocate(ptr: *mut u8, size: usize) {
     }
 }
 
+pub const STATUS_OK: u32 = 0;
+pub const STATUS_ERROR: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFormat {
+    Epub,
+}
+
+impl InputFormat {
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Epub),
+            _ => None,
+        }
+    }
+}
+
+pub fn convert_packed(data: &[u8], format: u32) -> Vec<u8> {
+    let Some(format) = InputFormat::from_code(format) else {
+        return pack_error(&format!("unsupported input format: {format}"));
+    };
+    match format {
+        InputFormat::Epub => match crate::convert::convert_epub(data) {
+            Ok(conversion) => pack_conversion(&conversion),
+            Err(error) => pack_error(&error.to_string()),
+        },
+    }
+}
+
+fn pack_conversion(conversion: &crate::convert::Conversion) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_bytes(&mut payload, conversion.markdown.as_bytes());
+    push_u32(&mut payload, conversion.images.len() as u32);
+    for image in &conversion.images {
+        push_bytes(&mut payload, image.path.as_str().as_bytes());
+        push_bytes(&mut payload, &image.data);
+    }
+    finish(STATUS_OK, payload)
+}
+
+fn pack_error(message: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_bytes(&mut payload, message.as_bytes());
+    finish(STATUS_ERROR, payload)
+}
+
+fn finish(status: u32, payload: Vec<u8>) -> Vec<u8> {
+    let total = (payload.len() + 8) as u32;
+    let mut packed = Vec::with_capacity(total as usize);
+    push_u32(&mut packed, total);
+    push_u32(&mut packed, status);
+    packed.extend_from_slice(&payload);
+    packed
+}
+
+fn push_u32(buffer: &mut Vec<u8>, value: u32) {
+    buffer.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_bytes(buffer: &mut Vec<u8>, bytes: &[u8]) {
+    push_u32(buffer, bytes.len() as u32);
+    buffer.extend_from_slice(bytes);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn leak(packed: Vec<u8>) -> *mut u8 {
+    let pointer = allocate(packed.len());
+    if !pointer.is_null() {
+        unsafe { core::ptr::copy_nonoverlapping(packed.as_ptr(), pointer, packed.len()) };
+    }
+    pointer
+}
+
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc(size: usize) -> *mut u8 {
     allocate(size)
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` readable bytes, as returned by `alloc`.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn convert(ptr: *const u8, len: usize, format: u32) -> *mut u8 {
+    let data = unsafe { core::slice::from_raw_parts(ptr, len) };
+    leak(convert_packed(data, format))
 }
 
 /// # Safety
@@ -44,6 +127,118 @@ pub unsafe extern "C" fn free(ptr: *mut u8, size: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod convert_packed {
+        use super::*;
+
+        struct Reader<'a> {
+            bytes: &'a [u8],
+            pos: usize,
+        }
+
+        impl<'a> Reader<'a> {
+            fn new(bytes: &'a [u8]) -> Self {
+                Self { bytes, pos: 0 }
+            }
+
+            fn u32(&mut self) -> u32 {
+                let value =
+                    u32::from_le_bytes(self.bytes[self.pos..self.pos + 4].try_into().unwrap());
+                self.pos += 4;
+                value
+            }
+
+            fn bytes(&mut self) -> &'a [u8] {
+                let len = self.u32() as usize;
+                let slice = &self.bytes[self.pos..self.pos + len];
+                self.pos += len;
+                slice
+            }
+
+            fn text(&mut self) -> String {
+                String::from_utf8(self.bytes().to_vec()).unwrap()
+            }
+        }
+
+        fn epub() -> Vec<u8> {
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let container = br#"<container><rootfiles>
+<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+</rootfiles></container>"#;
+            crate::convert::tests_support::zip(&[
+                ("META-INF/container.xml", container.to_vec()),
+                ("OEBPS/content.opf", opf.to_vec()),
+                (
+                    "OEBPS/chapter1.xhtml",
+                    br#"<h1>Title</h1><img src="fig.png" alt="F"/>"#.to_vec(),
+                ),
+                ("OEBPS/fig.png", b"PNGDATA".to_vec()),
+            ])
+        }
+
+        #[test]
+        fn when_conversion_succeeds_then_packs_markdown_and_images() {
+            let packed = convert_packed(&epub(), 0);
+
+            let mut reader = Reader::new(&packed);
+            assert_eq!(reader.u32() as usize, packed.len());
+            assert_eq!(reader.u32(), STATUS_OK);
+            assert!(reader.text().contains("# Title"));
+            assert_eq!(reader.u32(), 1);
+            assert_eq!(reader.text(), "OEBPS/fig.png");
+            assert_eq!(reader.bytes(), b"PNGDATA");
+            assert_eq!(reader.pos, packed.len());
+        }
+
+        #[test]
+        fn when_input_is_not_an_epub_then_packs_the_error_message() {
+            let packed = convert_packed(b"not an epub", 0);
+
+            let mut reader = Reader::new(&packed);
+            assert_eq!(reader.u32() as usize, packed.len());
+            assert_eq!(reader.u32(), STATUS_ERROR);
+            assert!(!reader.text().is_empty());
+            assert_eq!(reader.pos, packed.len());
+        }
+
+        #[test]
+        fn when_format_is_unknown_then_packs_the_error_message() {
+            let packed = convert_packed(&epub(), 99);
+
+            let mut reader = Reader::new(&packed);
+            reader.u32();
+            assert_eq!(reader.u32(), STATUS_ERROR);
+            assert_eq!(reader.text(), "unsupported input format: 99");
+        }
+
+        #[test]
+        fn when_there_is_no_image_then_image_count_is_zero() {
+            let container = br#"<container><rootfiles>
+<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+</rootfiles></container>"#;
+            let opf = br#"<package>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+            let epub = crate::convert::tests_support::zip(&[
+                ("META-INF/container.xml", container.to_vec()),
+                ("OEBPS/content.opf", opf.to_vec()),
+                ("OEBPS/chapter1.xhtml", b"<h1>Only</h1>".to_vec()),
+            ]);
+
+            let packed = convert_packed(&epub, 0);
+
+            let mut reader = Reader::new(&packed);
+            reader.u32();
+            assert_eq!(reader.u32(), STATUS_OK);
+            reader.text();
+            assert_eq!(reader.u32(), 0);
+            assert_eq!(reader.pos, packed.len());
+        }
+    }
 
     mod allocate {
         use super::*;

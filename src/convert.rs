@@ -10,31 +10,45 @@ pub struct ExtractedImage {
     pub data: Vec<u8>,
 }
 
-pub fn epub_to_markdown(data: &[u8]) -> Result<String, EpubError> {
-    let rendered: Vec<String> = read_spine_documents(data)?
-        .iter()
-        .map(|(path, content)| markdown::emit(&document_blocks(path, content)))
-        .collect();
-
-    Ok(rendered.join("\n\n"))
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conversion {
+    pub markdown: String,
+    pub images: Vec<ExtractedImage>,
 }
 
-pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
+pub fn convert_epub(data: &[u8]) -> Result<Conversion, EpubError> {
+    let mut rendered = Vec::new();
     let mut images: Vec<ExtractedImage> = Vec::new();
 
-    for (document_path, content) in read_spine_documents(data)? {
-        let blocks = xhtml::parse_blocks(&content, &document_path);
-        for path in markdown::collect_image_sources(&blocks) {
-            if images.iter().any(|image| image.path == path) {
+    for (path, content) in read_spine_documents(data)? {
+        let blocks = document_blocks(&path, &content);
+        rendered.push(markdown::emit(&blocks));
+
+        for source in markdown::collect_image_sources(&blocks) {
+            if images.iter().any(|image| image.path == source) {
                 continue;
             }
-            if let Ok(bytes) = zip::extract_by_name(data, path.as_str().as_bytes()) {
-                images.push(ExtractedImage { path, data: bytes });
+            if let Ok(bytes) = zip::extract_by_name(data, source.as_str().as_bytes()) {
+                images.push(ExtractedImage {
+                    path: source,
+                    data: bytes,
+                });
             }
         }
     }
 
-    Ok(images)
+    Ok(Conversion {
+        markdown: rendered.join("\n\n"),
+        images,
+    })
+}
+
+pub fn epub_to_markdown(data: &[u8]) -> Result<String, EpubError> {
+    Ok(convert_epub(data)?.markdown)
+}
+
+pub fn extract_images(data: &[u8]) -> Result<Vec<ExtractedImage>, EpubError> {
+    Ok(convert_epub(data)?.images)
 }
 
 fn document_blocks(path: &ResourcePath, content: &[u8]) -> Vec<Block> {
@@ -57,6 +71,75 @@ fn read_spine_documents(data: &[u8]) -> Result<Vec<(ResourcePath, Vec<u8>)>, Epu
     }
 
     Ok(documents)
+}
+
+#[cfg(test)]
+pub mod tests_support {
+    const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
+    const CENTRAL_DIR_SIGNATURE: u32 = 0x02014b50;
+    const EOCD_SIGNATURE: u32 = 0x06054b50;
+
+    pub fn zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut local_headers: Vec<u8> = Vec::new();
+        let mut offsets = Vec::new();
+
+        for (name, content) in entries {
+            let offset = local_headers.len() as u32;
+            let name = name.as_bytes();
+            local_headers.extend_from_slice(&LOCAL_FILE_HEADER_SIGNATURE.to_le_bytes());
+            local_headers.extend_from_slice(&20u16.to_le_bytes());
+            local_headers.extend_from_slice(&0u16.to_le_bytes());
+            local_headers.extend_from_slice(&0u16.to_le_bytes());
+            local_headers.extend_from_slice(&0u16.to_le_bytes());
+            local_headers.extend_from_slice(&0u16.to_le_bytes());
+            local_headers.extend_from_slice(&0u32.to_le_bytes());
+            local_headers.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            local_headers.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            local_headers.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            local_headers.extend_from_slice(&0u16.to_le_bytes());
+            local_headers.extend_from_slice(name);
+            local_headers.extend_from_slice(content);
+            offsets.push((name.to_vec(), content.len() as u32, offset));
+        }
+
+        let cd_offset = local_headers.len() as u32;
+        let mut cd = Vec::new();
+        for (name, size, offset) in &offsets {
+            cd.extend_from_slice(&CENTRAL_DIR_SIGNATURE.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&size.to_le_bytes());
+            cd.extend_from_slice(&size.to_le_bytes());
+            cd.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&offset.to_le_bytes());
+            cd.extend_from_slice(name);
+        }
+
+        let mut eocd = Vec::new();
+        eocd.extend_from_slice(&EOCD_SIGNATURE.to_le_bytes());
+        eocd.extend_from_slice(&0u16.to_le_bytes());
+        eocd.extend_from_slice(&0u16.to_le_bytes());
+        eocd.extend_from_slice(&(offsets.len() as u16).to_le_bytes());
+        eocd.extend_from_slice(&(offsets.len() as u16).to_le_bytes());
+        eocd.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        eocd.extend_from_slice(&cd_offset.to_le_bytes());
+        eocd.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut result = local_headers;
+        result.extend_from_slice(&cd);
+        result.extend_from_slice(&eocd);
+        result
+    }
 }
 
 #[cfg(test)]

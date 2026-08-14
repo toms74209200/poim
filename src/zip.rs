@@ -40,6 +40,21 @@ pub enum ZipError {
     EntryNotFound,
 }
 
+impl core::fmt::Display for ZipError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ZipError::UnexpectedEof => write!(f, "unexpected end of archive"),
+            ZipError::InvalidSignature => write!(f, "invalid zip signature"),
+            ZipError::EocdNotFound => write!(f, "end of central directory not found"),
+            ZipError::UnsupportedCompression(method) => {
+                write!(f, "unsupported compression method: {method}")
+            }
+            ZipError::InflateError(error) => write!(f, "inflate failed: {error}"),
+            ZipError::EntryNotFound => write!(f, "entry not found in archive"),
+        }
+    }
+}
+
 fn read_u16_le(data: &[u8], offset: usize) -> Result<u16, ZipError> {
     if offset + 2 > data.len() {
         return Err(ZipError::UnexpectedEof);
