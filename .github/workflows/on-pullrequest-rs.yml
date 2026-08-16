@@ -23,3 +23,12 @@ jobs:
     uses: ./.github/workflows/job-coverage.yml
     with:
       coverage-threshold: 80
+  large-test:
+    needs:
+      - small-test
+    strategy:
+      matrix:
+        frontend: [wasm]
+    uses: ./.github/workflows/job-test-large.yml
+    with:
+      frontend: ${{ matrix.frontend }}
