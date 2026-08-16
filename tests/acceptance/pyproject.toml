@@ -1,0 +1,16 @@
+[project]
+name = "acceptance"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-bdd>=8.1.0",
+    "ruff>=0.16.3",
+    "wasmtime>=47.0.1",
+]

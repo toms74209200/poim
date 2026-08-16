@@ -23,7 +23,7 @@
 	// "forwardPorts": [],
 
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash",
+	"postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash && curl -fsSL https://astral.sh/uv/install.sh | sh && rustup target add wasm32-unknown-unknown",
 
 	// Configure tool-specific properties.
 	// "customizations": {},

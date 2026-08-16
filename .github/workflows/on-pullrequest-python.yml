@@ -1,0 +1,18 @@
+name: On Pull Request(Python)
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'features/**'
+      - 'tests/acceptance/**'
+      - '.github/workflows/on-pullrequest-python.yml'
+
+jobs:
+  large-test:
+    strategy:
+      matrix:
+        frontend: [wasm]
+    uses: ./.github/workflows/job-test-large.yml
+    with:
+      frontend: ${{ matrix.frontend }}
