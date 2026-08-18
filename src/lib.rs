@@ -4,6 +4,7 @@ pub mod epub;
 pub mod inflate;
 pub mod ir;
 pub mod markdown;
+pub mod run;
 pub mod wasm;
 pub mod xhtml;
 pub mod zip;
