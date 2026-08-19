@@ -1,5 +1,5 @@
 use crate::cli::Args;
-use crate::convert;
+use crate::convert::{self, ExtractedImage};
 use crate::epub::EpubError;
 
 #[derive(Debug)]
@@ -35,6 +35,32 @@ pub fn run(args: &Args) -> Result<(), RunError> {
 
     std::fs::write(&args.output, &conversion.markdown).map_err(|source| RunError::Write {
         path: args.output.clone(),
+        source,
+    })?;
+
+    let Some(directory) = &args.images else {
+        return Ok(());
+    };
+
+    for image in &conversion.images {
+        write_image(directory, image)?;
+    }
+
+    Ok(())
+}
+
+fn write_image(directory: &str, image: &ExtractedImage) -> Result<(), RunError> {
+    let path = std::path::Path::new(directory).join(image.path.as_str());
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| RunError::Write {
+            path: parent.display().to_string(),
+            source,
+        })?;
+    }
+
+    std::fs::write(&path, &image.data).map_err(|source| RunError::Write {
+        path: path.display().to_string(),
         source,
     })
 }
