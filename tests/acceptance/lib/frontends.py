@@ -1,4 +1,6 @@
 import struct
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,6 +78,53 @@ class WasmFrontend:
         return unpack(packed)
 
 
+class CliFrontend:
+    BUILD_PATH = Path("target/release/poim")
+
+    def __init__(self, repo_root: Path):
+        self.binary = repo_root / self.BUILD_PATH
+        assert self.binary.is_file(), f"not built: {self.binary}"
+
+    def convert(self, epub: bytes) -> Conversion:
+        with tempfile.TemporaryDirectory() as workspace:
+            input_path = Path(workspace) / "input.epub"
+            input_path.write_bytes(epub)
+            markdown_path = Path(workspace) / "output.md"
+            images_path = Path(workspace) / "images"
+
+            completed = subprocess.run(
+                [
+                    str(self.binary),
+                    str(input_path),
+                    "-o",
+                    str(markdown_path),
+                    "--images",
+                    str(images_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                return Conversion(error=completed.stderr.strip())
+
+            return Conversion(
+                markdown=markdown_path.read_text(),
+                images=_read_tree(images_path),
+            )
+
+
+def _read_tree(root: Path) -> dict[str, bytes]:
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 FRONTENDS = {
+    "cli": CliFrontend,
     "wasm": WasmFrontend,
 }
