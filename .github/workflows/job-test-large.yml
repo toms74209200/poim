@@ -30,6 +30,10 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo build --target wasm32-unknown-unknown --release
+      - name: Build CLI
+        if: inputs.frontend == 'cli'
+        working-directory: .
+        run: cargo build --release
       - uses: actions/cache@v5
         with:
           path: tests/acceptance/.cache

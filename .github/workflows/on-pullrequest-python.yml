@@ -12,7 +12,7 @@ jobs:
   large-test:
     strategy:
       matrix:
-        frontend: [wasm]
+        frontend: [wasm, cli]
     uses: ./.github/workflows/job-test-large.yml
     with:
       frontend: ${{ matrix.frontend }}
