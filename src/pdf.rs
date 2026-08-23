@@ -16,6 +16,22 @@ const DICTIONARY_CLOSE: &[u8] = b">>";
 const DELIMITERS: [u8; 10] = *b"()<>[]{}/%";
 const LENGTH_KEY: &str = "Length";
 const MAX_REFERENCE_DEPTH: usize = 32;
+const FILTER_KEY: &str = "Filter";
+const DECODE_PARMS_KEY: &str = "DecodeParms";
+const PREDICTOR_KEY: &str = "Predictor";
+const COLORS_KEY: &str = "Colors";
+const BITS_PER_COMPONENT_KEY: &str = "BitsPerComponent";
+const COLUMNS_KEY: &str = "Columns";
+const FLATE_DECODE: &str = "FlateDecode";
+const ZLIB_DEFLATE_METHOD: u8 = 8;
+const ZLIB_CHECK_MODULUS: u16 = 31;
+const ZLIB_FDICT_FLAG: u8 = 0x20;
+const ZLIB_HEADER_LENGTH: usize = 2;
+const ZLIB_DICTIONARY_LENGTH: usize = 4;
+const NO_PREDICTOR: i64 = 1;
+const TIFF_PREDICTOR: i64 = 2;
+const PNG_PREDICTOR_MIN: i64 = 10;
+const PNG_PREDICTOR_MAX: i64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Version {
@@ -127,7 +143,7 @@ pub struct IndirectObject {
     pub object: Object,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PdfError {
     HeaderNotFound,
     StartxrefNotFound,
@@ -140,6 +156,11 @@ pub enum PdfError {
     ObjectNotFound,
     ObjectNumberMismatch,
     CircularReference,
+    NotAStream,
+    UnsupportedFilter(String),
+    UnsupportedPredictor(i64),
+    MalformedStream,
+    InflateError(crate::inflate::InflateError),
 }
 
 impl core::fmt::Display for PdfError {
@@ -158,6 +179,11 @@ impl core::fmt::Display for PdfError {
                 write!(f, "object number does not match the xref table")
             }
             PdfError::CircularReference => write!(f, "indirect references form a cycle"),
+            PdfError::NotAStream => write!(f, "object is not a stream"),
+            PdfError::UnsupportedFilter(name) => write!(f, "unsupported stream filter: {name}"),
+            PdfError::UnsupportedPredictor(value) => write!(f, "unsupported predictor: {value}"),
+            PdfError::MalformedStream => write!(f, "malformed stream data"),
+            PdfError::InflateError(error) => write!(f, "inflate failed: {error}"),
         }
     }
 }
@@ -685,6 +711,189 @@ fn skip_blanks(data: &[u8], from: usize) -> usize {
     position
 }
 
+pub fn decode_stream(object: &Object) -> Result<Vec<u8>, PdfError> {
+    let Object::Stream { data, .. } = object else {
+        return Err(PdfError::NotAStream);
+    };
+
+    let filters = stream_filters(object)?;
+    let parameters = decode_parameters(object, filters.len());
+    let mut decoded = data.clone();
+    for (filter, parameter) in filters.iter().zip(parameters) {
+        decoded = apply_filter(filter, parameter, &decoded)?;
+    }
+
+    Ok(decoded)
+}
+
+pub fn get_stream_data(
+    data: &[u8],
+    table: &XrefTable,
+    object_number: u32,
+) -> Result<Vec<u8>, PdfError> {
+    decode_stream(&get_object(data, table, object_number)?)
+}
+
+fn stream_filters(object: &Object) -> Result<Vec<&str>, PdfError> {
+    match object.get(FILTER_KEY) {
+        None | Some(Object::Null) => Ok(Vec::new()),
+        Some(Object::Name(name)) => Ok(vec![name.as_str()]),
+        Some(Object::Array(items)) => items
+            .iter()
+            .map(|item| item.as_name().ok_or(PdfError::MalformedStream))
+            .collect(),
+        Some(_) => Err(PdfError::MalformedStream),
+    }
+}
+
+fn decode_parameters(object: &Object, count: usize) -> Vec<Option<&Dictionary>> {
+    let mut parameters: Vec<Option<&Dictionary>> = match object.get(DECODE_PARMS_KEY) {
+        Some(Object::Dictionary(entries)) => vec![Some(entries)],
+        Some(Object::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Object::Dictionary(entries) => Some(entries),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    parameters.resize(count, None);
+
+    parameters
+}
+
+fn apply_filter(
+    filter: &str,
+    parameters: Option<&Dictionary>,
+    data: &[u8],
+) -> Result<Vec<u8>, PdfError> {
+    if filter != FLATE_DECODE {
+        return Err(PdfError::UnsupportedFilter(filter.to_string()));
+    }
+
+    let inflated = crate::inflate::inflate(deflate_body(data)).map_err(PdfError::InflateError)?;
+
+    undo_predictor(parameters, inflated)
+}
+
+fn deflate_body(data: &[u8]) -> &[u8] {
+    let Some((&method, &flags)) = data.first().zip(data.get(1)) else {
+        return data;
+    };
+    if method & 0x0f != ZLIB_DEFLATE_METHOD
+        || (u16::from(method) * 256 + u16::from(flags)) % ZLIB_CHECK_MODULUS != 0
+    {
+        return data;
+    }
+
+    let header = match flags & ZLIB_FDICT_FLAG {
+        0 => ZLIB_HEADER_LENGTH,
+        _ => ZLIB_HEADER_LENGTH + ZLIB_DICTIONARY_LENGTH,
+    };
+
+    data.get(header..).unwrap_or(data)
+}
+
+fn undo_predictor(parameters: Option<&Dictionary>, data: Vec<u8>) -> Result<Vec<u8>, PdfError> {
+    let predictor = integer_entry(parameters, PREDICTOR_KEY, NO_PREDICTOR);
+    if predictor == NO_PREDICTOR {
+        return Ok(data);
+    }
+
+    let colors = positive_entry(parameters, COLORS_KEY, 1)?;
+    let bits = positive_entry(parameters, BITS_PER_COMPONENT_KEY, 8)?;
+    let columns = positive_entry(parameters, COLUMNS_KEY, 1)?;
+    let pixel = (colors * bits).div_ceil(8).max(1);
+    let row_length = (colors * bits * columns).div_ceil(8);
+
+    match predictor {
+        TIFF_PREDICTOR if bits == 8 => Ok(undo_tiff_predictor(&data, pixel, row_length)),
+        PNG_PREDICTOR_MIN..=PNG_PREDICTOR_MAX => undo_png_predictor(&data, pixel, row_length),
+        other => Err(PdfError::UnsupportedPredictor(other)),
+    }
+}
+
+fn undo_png_predictor(data: &[u8], pixel: usize, row_length: usize) -> Result<Vec<u8>, PdfError> {
+    let mut output: Vec<u8> = Vec::with_capacity(data.len());
+    let mut previous = vec![0u8; row_length];
+    for chunk in data.chunks(row_length + 1) {
+        let (filter, row) = chunk.split_first().ok_or(PdfError::MalformedStream)?;
+        let start = output.len();
+        for (index, byte) in row.iter().enumerate() {
+            let left = if index >= pixel {
+                output[start + index - pixel]
+            } else {
+                0
+            };
+            let up = previous[index];
+            let upper_left = if index >= pixel {
+                previous[index - pixel]
+            } else {
+                0
+            };
+            let value = match *filter {
+                0 => *byte,
+                1 => byte.wrapping_add(left),
+                2 => byte.wrapping_add(up),
+                3 => byte.wrapping_add(((u16::from(left) + u16::from(up)) / 2) as u8),
+                4 => byte.wrapping_add(paeth(left, up, upper_left)),
+                _ => return Err(PdfError::MalformedStream),
+            };
+            output.push(value);
+        }
+        previous.clear();
+        previous.extend_from_slice(&output[start..]);
+        previous.resize(row_length, 0);
+    }
+
+    Ok(output)
+}
+
+fn undo_tiff_predictor(data: &[u8], pixel: usize, row_length: usize) -> Vec<u8> {
+    let mut output = data.to_vec();
+    for row in output.chunks_mut(row_length) {
+        for index in pixel..row.len() {
+            row[index] = row[index].wrapping_add(row[index - pixel]);
+        }
+    }
+
+    output
+}
+
+fn paeth(left: u8, up: u8, upper_left: u8) -> u8 {
+    let estimate = i16::from(left) + i16::from(up) - i16::from(upper_left);
+    let from_left = (estimate - i16::from(left)).abs();
+    let from_up = (estimate - i16::from(up)).abs();
+    let from_upper_left = (estimate - i16::from(upper_left)).abs();
+    if from_left <= from_up && from_left <= from_upper_left {
+        return left;
+    }
+    if from_up <= from_upper_left {
+        return up;
+    }
+
+    upper_left
+}
+
+fn integer_entry(parameters: Option<&Dictionary>, key: &str, default: i64) -> i64 {
+    parameters
+        .and_then(|entries| entries.iter().find(|(name, _)| name == key))
+        .and_then(|(_, object)| object.as_i64())
+        .unwrap_or(default)
+}
+
+fn positive_entry(
+    parameters: Option<&Dictionary>,
+    key: &str,
+    default: i64,
+) -> Result<usize, PdfError> {
+    match integer_entry(parameters, key, default) {
+        value if value > 0 => usize::try_from(value).map_err(|_| PdfError::MalformedStream),
+        _ => Err(PdfError::MalformedStream),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +926,65 @@ mod tests {
         let table = xref_section(&format!("0 {}\n{entries}", objects.len() + 1));
 
         format!("{body}{table}startxref\n{}\n%%EOF\n", body.len()).into_bytes()
+    }
+
+    fn stored_deflate(payload: &[u8]) -> Vec<u8> {
+        let length = payload.len() as u16;
+        let mut block = vec![0x01];
+        block.extend_from_slice(&length.to_le_bytes());
+        block.extend_from_slice(&(!length).to_le_bytes());
+        block.extend_from_slice(payload);
+
+        block
+    }
+
+    fn zlib(payload: &[u8]) -> Vec<u8> {
+        let mut data = vec![0x78, 0x01];
+        data.extend_from_slice(&stored_deflate(payload));
+        data.extend_from_slice(&[0, 0, 0, 0]);
+
+        data
+    }
+
+    fn flate_stream(entries: Dictionary, payload: &[u8]) -> Object {
+        let mut dictionary = vec![(
+            FILTER_KEY.to_string(),
+            Object::Name(FLATE_DECODE.to_string()),
+        )];
+        dictionary.extend(entries);
+
+        Object::Stream {
+            dictionary,
+            data: zlib(payload),
+        }
+    }
+
+    fn png_parameters(entries: Dictionary) -> Dictionary {
+        vec![(DECODE_PARMS_KEY.to_string(), Object::Dictionary(entries))]
+    }
+
+    fn pdf_with_stream(payload: &[u8]) -> Vec<u8> {
+        let mut data = b"%PDF-1.7\n".to_vec();
+        let offset = data.len();
+        data.extend_from_slice(
+            format!(
+                "1 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n",
+                payload.len()
+            )
+            .as_bytes(),
+        );
+        data.extend_from_slice(payload);
+        data.extend_from_slice(b"\nendstream\nendobj\n");
+        let body_length = data.len();
+        let table = xref_section(&format!(
+            "0 2\n{}{}",
+            entry_line(0, 65535, 'f'),
+            entry_line(offset as u64, 0, 'n')
+        ));
+        data.extend_from_slice(table.as_bytes());
+        data.extend_from_slice(format!("startxref\n{body_length}\n%%EOF\n").as_bytes());
+
+        data
     }
 
     mod parse_header {
@@ -1658,6 +1926,333 @@ mod tests {
         #[test]
         fn when_as_array_with_null_then_returns_none() {
             assert_eq!(Object::Null.as_array(), None);
+        }
+    }
+
+    mod decode_stream {
+        use super::*;
+
+        #[test]
+        fn when_decode_with_flate_filter_then_returns_inflated_bytes() {
+            let stream = flate_stream(Vec::new(), b"Hello");
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_filter_array_then_returns_inflated_bytes() {
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Array(vec![Object::Name("FlateDecode".to_string())]),
+                )],
+                data: zlib(b"Hello"),
+            };
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_without_filter_then_returns_raw_bytes() {
+            let stream = Object::Stream {
+                dictionary: Vec::new(),
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_null_filter_then_returns_raw_bytes() {
+            let stream = Object::Stream {
+                dictionary: vec![("Filter".to_string(), Object::Null)],
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_raw_deflate_body_then_returns_inflated_bytes() {
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Name("FlateDecode".to_string()),
+                )],
+                data: stored_deflate(b"Hello"),
+            };
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_preset_dictionary_flag_then_skips_dictionary() {
+            let mut data = vec![0x78, 0x20, 0x00, 0x00, 0x00, 0x00];
+            data.extend_from_slice(&stored_deflate(b"Hello"));
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Name("FlateDecode".to_string()),
+                )],
+                data,
+            };
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_unsupported_filter_then_returns_error() {
+            let stream = Object::Stream {
+                dictionary: vec![("Filter".to_string(), Object::Name("DCTDecode".to_string()))],
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(
+                decode_stream(&stream),
+                Err(PdfError::UnsupportedFilter("DCTDecode".to_string()))
+            );
+        }
+
+        #[test]
+        fn when_decode_with_unsupported_second_filter_then_returns_error() {
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Array(vec![
+                        Object::Name("FlateDecode".to_string()),
+                        Object::Name("DCTDecode".to_string()),
+                    ]),
+                )],
+                data: zlib(b"Hello"),
+            };
+            assert_eq!(
+                decode_stream(&stream),
+                Err(PdfError::UnsupportedFilter("DCTDecode".to_string()))
+            );
+        }
+
+        #[test]
+        fn when_decode_with_non_stream_object_then_returns_error() {
+            assert_eq!(
+                decode_stream(&Object::Integer(1)),
+                Err(PdfError::NotAStream)
+            );
+        }
+
+        #[test]
+        fn when_decode_with_indirect_filter_then_returns_error() {
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Reference {
+                        object_number: 5,
+                        generation: 0,
+                    },
+                )],
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(decode_stream(&stream), Err(PdfError::MalformedStream));
+        }
+
+        #[test]
+        fn when_decode_with_non_name_filter_in_array_then_returns_error() {
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Array(vec![Object::Integer(1)]),
+                )],
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(decode_stream(&stream), Err(PdfError::MalformedStream));
+        }
+
+        #[test]
+        fn when_decode_with_corrupt_deflate_data_then_returns_inflate_error() {
+            let mut data = vec![0x78, 0x01, 0x01, 0x05, 0x00, 0x00, 0x00];
+            data.extend_from_slice(b"Hello");
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Name("FlateDecode".to_string()),
+                )],
+                data,
+            };
+            assert_eq!(
+                decode_stream(&stream),
+                Err(PdfError::InflateError(
+                    crate::inflate::InflateError::InvalidStoredLen
+                ))
+            );
+        }
+
+        #[test]
+        fn when_decode_with_predictor_one_then_returns_bytes_unchanged() {
+            let parameters = png_parameters(vec![("Predictor".to_string(), Object::Integer(1))]);
+            let stream = flate_stream(parameters, b"Hello");
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_png_none_predictor_then_returns_original_bytes() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[0, 10, 20, 30]);
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30]));
+        }
+
+        #[test]
+        fn when_decode_with_png_sub_predictor_then_returns_original_bytes() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[1, 10, 10, 10]);
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30]));
+        }
+
+        #[test]
+        fn when_decode_with_png_up_predictor_then_returns_original_bytes() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[0, 10, 20, 30, 2, 1, 2, 3]);
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30, 11, 22, 33]));
+        }
+
+        #[test]
+        fn when_decode_with_png_average_predictor_then_returns_original_bytes() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[3, 10, 15, 20]);
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30]));
+        }
+
+        #[test]
+        fn when_decode_with_png_paeth_predictor_then_returns_original_bytes() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[4, 10, 10, 10]);
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30]));
+        }
+
+        #[test]
+        fn when_decode_with_multiple_colors_then_predicts_per_pixel() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Colors".to_string(), Object::Integer(3)),
+                ("Columns".to_string(), Object::Integer(2)),
+            ]);
+            let stream = flate_stream(parameters, &[1, 1, 2, 3, 4, 5, 6]);
+            assert_eq!(decode_stream(&stream), Ok(vec![1, 2, 3, 5, 7, 9]));
+        }
+
+        #[test]
+        fn when_decode_with_tiff_predictor_then_returns_original_bytes() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(2)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[10, 10, 10, 40, 10, 10]);
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30, 40, 50, 60]));
+        }
+
+        #[test]
+        fn when_decode_with_tiff_predictor_below_eight_bits_then_returns_error() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(2)),
+                ("BitsPerComponent".to_string(), Object::Integer(4)),
+                ("Columns".to_string(), Object::Integer(4)),
+            ]);
+            let stream = flate_stream(parameters, &[1, 2]);
+            assert_eq!(
+                decode_stream(&stream),
+                Err(PdfError::UnsupportedPredictor(2))
+            );
+        }
+
+        #[test]
+        fn when_decode_with_unsupported_predictor_then_returns_error() {
+            let parameters = png_parameters(vec![("Predictor".to_string(), Object::Integer(3))]);
+            let stream = flate_stream(parameters, b"Hello");
+            assert_eq!(
+                decode_stream(&stream),
+                Err(PdfError::UnsupportedPredictor(3))
+            );
+        }
+
+        #[test]
+        fn when_decode_with_invalid_row_filter_then_returns_error() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(3)),
+            ]);
+            let stream = flate_stream(parameters, &[5, 1, 2, 3]);
+            assert_eq!(decode_stream(&stream), Err(PdfError::MalformedStream));
+        }
+
+        #[test]
+        fn when_decode_with_zero_columns_then_returns_error() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(0)),
+            ]);
+            let stream = flate_stream(parameters, &[0, 1]);
+            assert_eq!(decode_stream(&stream), Err(PdfError::MalformedStream));
+        }
+
+        #[test]
+        fn when_decode_with_decode_parms_array_then_applies_parameters() {
+            let stream = Object::Stream {
+                dictionary: vec![
+                    (
+                        "Filter".to_string(),
+                        Object::Array(vec![Object::Name("FlateDecode".to_string())]),
+                    ),
+                    (
+                        "DecodeParms".to_string(),
+                        Object::Array(vec![Object::Dictionary(vec![
+                            ("Predictor".to_string(), Object::Integer(12)),
+                            ("Columns".to_string(), Object::Integer(3)),
+                        ])]),
+                    ),
+                ],
+                data: zlib(&[1, 10, 10, 10]),
+            };
+            assert_eq!(decode_stream(&stream), Ok(vec![10, 20, 30]));
+        }
+
+        #[test]
+        fn when_decode_with_null_decode_parms_then_returns_inflated_bytes() {
+            let stream = flate_stream(vec![("DecodeParms".to_string(), Object::Null)], b"Hello");
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+    }
+
+    mod get_stream_data {
+        use super::*;
+
+        #[test]
+        fn when_get_with_flate_stream_then_returns_decoded_bytes() {
+            let data = pdf_with_stream(&zlib(b"Hello"));
+            let table = read_xref_table(&data).unwrap();
+            assert_eq!(get_stream_data(&data, &table, 1), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_get_with_non_stream_object_then_returns_error() {
+            let data = minimal_pdf();
+            let table = read_xref_table(&data).unwrap();
+            assert_eq!(get_stream_data(&data, &table, 1), Err(PdfError::NotAStream));
+        }
+
+        #[test]
+        fn when_get_with_unknown_object_then_returns_error() {
+            let data = pdf_with_stream(&zlib(b"Hello"));
+            let table = read_xref_table(&data).unwrap();
+            assert_eq!(
+                get_stream_data(&data, &table, 7),
+                Err(PdfError::ObjectNotFound)
+            );
         }
     }
 }
