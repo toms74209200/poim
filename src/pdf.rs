@@ -692,11 +692,11 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn is_regular(byte: u8) -> bool {
+pub(crate) fn is_regular(byte: u8) -> bool {
     !WHITESPACE.contains(&byte) && !DELIMITERS.contains(&byte)
 }
 
-fn skip_blanks(data: &[u8], from: usize) -> usize {
+pub(crate) fn skip_blanks(data: &[u8], from: usize) -> usize {
     let mut position = skip_whitespace(data, from);
     while data.get(position) == Some(&b'%') {
         while data
@@ -1634,6 +1634,56 @@ mod tests {
             let result = parse_object(b"<< /Length 0 >>\nstreamendstream", 0);
             assert_eq!(result, Err(PdfError::MalformedObject));
         }
+
+        #[test]
+        fn when_parse_with_carriage_return_escape_then_returns_string() {
+            let result = parse_object(br"(a\rb)", 0);
+            assert_eq!(result, Ok((Object::String(b"a\rb".to_vec()), 6)));
+        }
+
+        #[test]
+        fn when_parse_with_backspace_and_form_feed_escapes_then_returns_string() {
+            let result = parse_object(br"(\b\f)", 0);
+            assert_eq!(result, Ok((Object::String(vec![0x08, 0x0c]), 6)));
+        }
+
+        #[test]
+        fn when_parse_with_escaped_crlf_then_returns_joined_string() {
+            let result = parse_object(b"(a\\\r\nb)", 0);
+            assert_eq!(result, Ok((Object::String(b"ab".to_vec()), 7)));
+        }
+
+        #[test]
+        fn when_parse_with_lowercase_hex_string_then_returns_string() {
+            let result = parse_object(b"<48656c6c6f>", 0);
+            assert_eq!(result, Ok((Object::String(b"Hello".to_vec()), 12)));
+        }
+
+        #[test]
+        fn when_parse_with_lowercase_name_hex_escape_then_returns_decoded_name() {
+            let result = parse_object(b"/A#2fB", 0);
+            assert_eq!(result, Ok((Object::Name("A/B".to_string()), 6)));
+        }
+
+        #[test]
+        fn when_parse_with_stream_ending_without_eol_then_returns_stream() {
+            let result = parse_object(b"<< /Length 99 >>\nstream\nHelloendstream", 0);
+            let stream = Object::Stream {
+                dictionary: vec![("Length".to_string(), Object::Integer(99))],
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(result, Ok((stream, 38)));
+        }
+
+        #[test]
+        fn when_parse_with_stream_ending_with_carriage_return_then_trims_it() {
+            let result = parse_object(b"<< /Length 99 >>\nstream\nHello\rendstream", 0);
+            let stream = Object::Stream {
+                dictionary: vec![("Length".to_string(), Object::Integer(99))],
+                data: b"Hello".to_vec(),
+            };
+            assert_eq!(result, Ok((stream, 39)));
+        }
     }
 
     mod parse_indirect_object {
@@ -2225,6 +2275,48 @@ mod tests {
         fn when_decode_with_null_decode_parms_then_returns_inflated_bytes() {
             let stream = flate_stream(vec![("DecodeParms".to_string(), Object::Null)], b"Hello");
             assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_non_dictionary_decode_parms_then_ignores_them() {
+            let stream = Object::Stream {
+                dictionary: vec![
+                    (
+                        "Filter".to_string(),
+                        Object::Array(vec![Object::Name("FlateDecode".to_string())]),
+                    ),
+                    ("DecodeParms".to_string(), Object::Array(vec![Object::Null])),
+                ],
+                data: zlib(b"Hello"),
+            };
+            assert_eq!(decode_stream(&stream), Ok(b"Hello".to_vec()));
+        }
+
+        #[test]
+        fn when_decode_with_data_shorter_than_zlib_header_then_returns_inflate_error() {
+            let stream = Object::Stream {
+                dictionary: vec![(
+                    "Filter".to_string(),
+                    Object::Name("FlateDecode".to_string()),
+                )],
+                data: vec![0x78],
+            };
+            assert_eq!(
+                decode_stream(&stream),
+                Err(PdfError::InflateError(
+                    crate::inflate::InflateError::UnexpectedEof
+                ))
+            );
+        }
+
+        #[test]
+        fn when_decode_with_paeth_predictor_over_rows_then_selects_nearest_neighbour() {
+            let parameters = png_parameters(vec![
+                ("Predictor".to_string(), Object::Integer(12)),
+                ("Columns".to_string(), Object::Integer(2)),
+            ]);
+            let stream = flate_stream(parameters, &[0, 100, 200, 4, 166, 50]);
+            assert_eq!(decode_stream(&stream), Ok(vec![100, 200, 10, 150]));
         }
     }
 
