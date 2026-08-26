@@ -1,8 +1,8 @@
+use crate::epub::xhtml;
+use crate::epub::zip;
 use crate::epub::{self, EpubError};
 use crate::ir::{Anchor, Block, ResourcePath};
 use crate::markdown;
-use crate::xhtml;
-use crate::zip;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtractedImage {
@@ -449,7 +449,9 @@ mod tests {
 
             assert_eq!(
                 epub_to_markdown(&epub),
-                Err(EpubError::ZipError(crate::zip::ZipError::EntryNotFound))
+                Err(EpubError::ZipError(
+                    crate::epub::zip::ZipError::EntryNotFound
+                ))
             );
         }
 
@@ -461,7 +463,9 @@ mod tests {
 
             assert_eq!(
                 epub_to_markdown(&epub),
-                Err(EpubError::ZipError(crate::zip::ZipError::EntryNotFound))
+                Err(EpubError::ZipError(
+                    crate::epub::zip::ZipError::EntryNotFound
+                ))
             );
         }
 
@@ -662,7 +666,9 @@ mod tests {
 
             assert_eq!(
                 extract_images(&epub),
-                Err(EpubError::ZipError(crate::zip::ZipError::EntryNotFound))
+                Err(EpubError::ZipError(
+                    crate::epub::zip::ZipError::EntryNotFound
+                ))
             );
         }
     }
