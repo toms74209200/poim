@@ -1,5 +1,4 @@
 pub mod cli;
-pub mod content;
 pub mod convert;
 pub mod epub;
 pub mod inflate;
@@ -8,5 +7,3 @@ pub mod markdown;
 pub mod pdf;
 pub mod run;
 pub mod wasm;
-pub mod xhtml;
-pub mod zip;

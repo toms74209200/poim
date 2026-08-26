@@ -1,4 +1,4 @@
-use crate::pdf::{Object, PdfError};
+use super::{Object, PdfError};
 
 const TRUE_OPERATOR: &str = "true";
 const FALSE_OPERATOR: &str = "false";
@@ -50,13 +50,13 @@ pub fn parse_content(data: &[u8]) -> Result<Vec<Operation>, PdfError> {
     let mut operands: Vec<Object> = Vec::new();
     let mut position = 0;
     loop {
-        position = crate::pdf::skip_blanks(data, position);
+        position = super::skip_blanks(data, position);
         let Some(byte) = data.get(position).copied() else {
             return Ok(operations);
         };
 
         if is_operand_start(byte) {
-            let (object, after_object) = crate::pdf::parse_object(data, position)?;
+            let (object, after_object) = super::parse_object(data, position)?;
             operands.push(object);
             position = after_object;
             continue;
@@ -245,7 +245,7 @@ fn read_token(data: &[u8], from: usize) -> Result<(String, usize), PdfError> {
     let mut position = from;
     while data
         .get(position)
-        .is_some_and(|byte| crate::pdf::is_regular(*byte))
+        .is_some_and(|byte| super::is_regular(*byte))
     {
         position += 1;
     }
@@ -264,10 +264,10 @@ fn skip_inline_image(data: &[u8], from: usize) -> usize {
     let mut position = from;
     while let Some(found) = find_from(data, INLINE_IMAGE_END, position) {
         let after_keyword = found + INLINE_IMAGE_END.len();
-        let separated_before = found == 0 || !crate::pdf::is_regular(data[found - 1]);
+        let separated_before = found == 0 || !super::is_regular(data[found - 1]);
         let separated_after = data
             .get(after_keyword)
-            .is_none_or(|byte| !crate::pdf::is_regular(*byte));
+            .is_none_or(|byte| !super::is_regular(*byte));
         if separated_before && separated_after {
             return after_keyword;
         }
