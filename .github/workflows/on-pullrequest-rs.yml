@@ -6,14 +6,19 @@ on:
     paths:
       - '**/*.rs'
       - 'Cargo.toml'
+      - 'scripts/**'
       - '.github/workflows/on-pullrequest-rs.yml'
 
 jobs:
+  fetch-data:
+    uses: ./.github/workflows/job-fetch-data.yml
   lint:
+    needs: fetch-data
     uses: ./.github/workflows/job-lint.yml
     permissions:
       contents: write
   small-test:
+    needs: fetch-data
     uses: ./.github/workflows/job-test-small.yml
     with:
       with-coverage: true
