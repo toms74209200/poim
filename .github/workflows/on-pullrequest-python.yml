@@ -9,7 +9,10 @@ on:
       - '.github/workflows/on-pullrequest-python.yml'
 
 jobs:
+  fetch-data:
+    uses: ./.github/workflows/job-fetch-data.yml
   large-test:
+    needs: fetch-data
     strategy:
       matrix:
         frontend: [wasm, cli]
