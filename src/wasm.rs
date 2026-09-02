@@ -31,12 +31,14 @@ pub const STATUS_ERROR: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
     Epub,
+    Pdf,
 }
 
 impl InputFormat {
     pub fn from_code(code: u32) -> Option<Self> {
         match code {
             0 => Some(Self::Epub),
+            1 => Some(Self::Pdf),
             _ => None,
         }
     }
@@ -48,6 +50,10 @@ pub fn convert_packed(data: &[u8], format: u32) -> Vec<u8> {
     };
     match format {
         InputFormat::Epub => match crate::convert::convert_epub(data) {
+            Ok(conversion) => pack_conversion(&conversion),
+            Err(error) => pack_error(&error.to_string()),
+        },
+        InputFormat::Pdf => match crate::convert::convert_pdf(data) {
             Ok(conversion) => pack_conversion(&conversion),
             Err(error) => pack_error(&error.to_string()),
         },
@@ -196,6 +202,30 @@ mod tests {
         #[test]
         fn when_input_is_not_an_epub_then_packs_the_error_message() {
             let packed = convert_packed(b"not an epub", 0);
+
+            let mut reader = Reader::new(&packed);
+            assert_eq!(reader.u32() as usize, packed.len());
+            assert_eq!(reader.u32(), STATUS_ERROR);
+            assert!(!reader.text().is_empty());
+            assert_eq!(reader.pos, packed.len());
+        }
+
+        #[test]
+        fn when_input_is_a_pdf_then_packs_its_markdown() {
+            let pdf = crate::convert::tests_support::pdf("BT /F1 12 Tf 50 700 Td (Title) Tj ET");
+            let packed = convert_packed(&pdf, 1);
+
+            let mut reader = Reader::new(&packed);
+            assert_eq!(reader.u32() as usize, packed.len());
+            assert_eq!(reader.u32(), STATUS_OK);
+            assert_eq!(reader.text(), "Title");
+            assert_eq!(reader.u32(), 0);
+            assert_eq!(reader.pos, packed.len());
+        }
+
+        #[test]
+        fn when_input_is_not_a_pdf_then_packs_the_error_message() {
+            let packed = convert_packed(b"not a pdf", 1);
 
             let mut reader = Reader::new(&packed);
             assert_eq!(reader.u32() as usize, packed.len());
