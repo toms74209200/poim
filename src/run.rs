@@ -1,6 +1,5 @@
 use crate::cli::Args;
-use crate::convert::{self, ExtractedImage};
-use crate::epub::EpubError;
+use crate::convert::{self, ConvertError, ExtractedImage};
 
 #[derive(Debug)]
 pub enum RunError {
@@ -8,7 +7,7 @@ pub enum RunError {
         path: String,
         source: std::io::Error,
     },
-    Convert(EpubError),
+    Convert(ConvertError),
     Write {
         path: String,
         source: std::io::Error,
@@ -31,7 +30,7 @@ pub fn run(args: &Args) -> Result<(), RunError> {
         source,
     })?;
 
-    let conversion = convert::convert_epub(&data).map_err(RunError::Convert)?;
+    let conversion = convert::convert(&data).map_err(RunError::Convert)?;
 
     std::fs::write(&args.output, &conversion.markdown).map_err(|source| RunError::Write {
         path: args.output.clone(),
