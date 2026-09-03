@@ -40,5 +40,10 @@ def epub() -> dict:
 
 
 @pytest.fixture
+def pdf() -> dict:
+    return {}
+
+
+@pytest.fixture
 def result() -> dict:
     return {}
