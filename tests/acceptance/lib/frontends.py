@@ -8,6 +8,8 @@ from wasmtime import Instance, Module, Store
 
 STATUS_OK = 0
 FORMAT_EPUB = 0
+FORMAT_PDF = 1
+SUFFIXES = {FORMAT_EPUB: "epub", FORMAT_PDF: "pdf"}
 
 
 @dataclass
@@ -63,14 +65,14 @@ class WasmFrontend:
         module = Module.from_file(self.store.engine, str(path))
         self.exports = Instance(self.store, module, []).exports(self.store)
 
-    def convert(self, epub: bytes) -> Conversion:
-        pointer = self.exports["alloc"](self.store, len(epub))
+    def convert(self, document: bytes, format: int = FORMAT_EPUB) -> Conversion:
+        pointer = self.exports["alloc"](self.store, len(document))
         assert pointer != 0, "alloc returned a null pointer"
         memory = self.exports["memory"]
-        memory.write(self.store, epub, pointer)
+        memory.write(self.store, document, pointer)
 
-        result = self.exports["convert"](self.store, pointer, len(epub), FORMAT_EPUB)
-        self.exports["free"](self.store, pointer, len(epub))
+        result = self.exports["convert"](self.store, pointer, len(document), format)
+        self.exports["free"](self.store, pointer, len(document))
 
         total = struct.unpack_from("<I", memory.read(self.store, result, result + 4))[0]
         packed = bytes(memory.read(self.store, result, result + total))
@@ -85,10 +87,10 @@ class CliFrontend:
         self.binary = repo_root / self.BUILD_PATH
         assert self.binary.is_file(), f"not built: {self.binary}"
 
-    def convert(self, epub: bytes) -> Conversion:
+    def convert(self, document: bytes, format: int = FORMAT_EPUB) -> Conversion:
         with tempfile.TemporaryDirectory() as workspace:
-            input_path = Path(workspace) / "input.epub"
-            input_path.write_bytes(epub)
+            input_path = Path(workspace) / f"input.{SUFFIXES[format]}"
+            input_path.write_bytes(document)
             markdown_path = Path(workspace) / "output.md"
             images_path = Path(workspace) / "images"
 
